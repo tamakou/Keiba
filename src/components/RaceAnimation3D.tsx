@@ -7,6 +7,7 @@ interface RaceAnimationProps {
     winner: Horse;
     courseStr: string;
     onFinish: () => void;
+    onClose?: () => void;
 }
 
 interface RunnerState {
@@ -18,7 +19,7 @@ interface RunnerState {
     finished: boolean;
 }
 
-export default function RaceAnimation3D({ horses, winner, courseStr, onFinish }: RaceAnimationProps) {
+export default function RaceAnimation3D({ horses, winner, courseStr, onFinish, onClose }: RaceAnimationProps) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const requestRef = useRef<number | null>(null);
@@ -155,7 +156,8 @@ export default function RaceAnimation3D({ horses, winner, courseStr, onFinish }:
                 if (runnersRef.current.every(r => r.finished)) {
                     allFinished = true;
                     setRaceEnded(true);
-                    setTimeout(onFinish, 3000);
+                    // Disable auto-close to show results
+                    // setTimeout(onFinish, 3000); 
                 }
             }
 
@@ -337,12 +339,71 @@ export default function RaceAnimation3D({ horses, winner, courseStr, onFinish }:
 
             {raceEnded && (
                 <div style={{
-                    position: 'absolute', top: '50%', left: '50%', transform: 'translate(-50%, -50%)',
-                    fontSize: '4rem', fontWeight: 'bold', color: '#FFD700', textShadow: '0 0 30px #000',
-                    background: 'rgba(0,0,0,0.8)', padding: '30px 60px', borderRadius: '15px',
-                    border: '3px solid #FFD700'
+                    position: 'absolute', top: '0', left: '0', right: '0', bottom: '0',
+                    background: 'rgba(0,0,0,0.85)',
+                    display: 'flex', flexDirection: 'column', alignItems: 'center', justifyContent: 'center',
+                    zIndex: 100
                 }}>
-                    🎉 GOAL 🎉
+                    <div style={{
+                        background: '#1a1a2e', padding: '30px', borderRadius: '15px',
+                        border: '2px solid #FFD700', minWidth: '400px', maxWidth: '90%',
+                        textAlign: 'center', maxHeight: '80%', overflowY: 'auto'
+                    }}>
+                        <h2 style={{ color: '#FFD700', fontSize: '2rem', marginBottom: '20px', textShadow: '0 0 10px #FFD700' }}>
+                            🏁 RACE RESULT 🏁
+                        </h2>
+
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '10px', marginBottom: '30px' }}>
+                            {rankings.map((h, i) => (
+                                <div key={h.number} style={{
+                                    display: 'flex', alignItems: 'center',
+                                    padding: '10px',
+                                    background: i === 0 ? 'linear-gradient(90deg, #FFD700 0%, #B8860B 100%)' : 'rgba(255,255,255,0.1)',
+                                    borderRadius: '8px',
+                                    transform: i === 0 ? 'scale(1.05)' : 'none',
+                                    border: i === 0 ? '2px solid #fff' : 'none'
+                                }}>
+                                    <div style={{
+                                        width: '40px', fontSize: '1.5rem', fontWeight: 'bold',
+                                        color: i === 0 ? '#000' : '#fff'
+                                    }}>
+                                        {i + 1}
+                                    </div>
+                                    <div style={{ flex: 1, textAlign: 'left', marginLeft: '10px' }}>
+                                        <div style={{ fontSize: '1.2rem', fontWeight: 'bold', color: i === 0 ? '#000' : '#fff' }}>
+                                            {h.name}
+                                        </div>
+                                        <div style={{ fontSize: '0.8rem', color: i === 0 ? '#333' : '#aaa' }}>
+                                            Gate: {h.gate} / No: {h.number}
+                                        </div>
+                                    </div>
+                                    {i === 0 && <div style={{ fontSize: '2rem' }}>🥇</div>}
+                                    {i === 1 && <div style={{ fontSize: '1.5rem' }}>🥈</div>}
+                                    {i === 2 && <div style={{ fontSize: '1.5rem' }}>🥉</div>}
+                                </div>
+                            ))}
+                        </div>
+
+                        <button
+                            onClick={onFinish}
+                            style={{
+                                padding: '15px 40px',
+                                fontSize: '1.2rem',
+                                fontWeight: 'bold',
+                                background: '#FFD700',
+                                color: '#000',
+                                border: 'none',
+                                borderRadius: '30px',
+                                cursor: 'pointer',
+                                transition: 'transform 0.2s',
+                                boxShadow: '0 0 20px rgba(255, 215, 0, 0.4)'
+                            }}
+                            onMouseOver={e => e.currentTarget.style.transform = 'scale(1.05)'}
+                            onMouseOut={e => e.currentTarget.style.transform = 'scale(1.0)'}
+                        >
+                            Close
+                        </button>
+                    </div>
                 </div>
             )}
         </div>
