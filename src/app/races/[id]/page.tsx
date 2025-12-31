@@ -2,6 +2,7 @@
 import { getRaceDetails } from '@/lib/netkeiba';
 import { analyzeRace } from '@/lib/analysis';
 import RaceDetailView from '@/components/RaceDetailView';
+import { RaceSystem } from '@/lib/types';
 
 // Server Component with searchParams support
 export default async function RacePage({
@@ -14,12 +15,16 @@ export default async function RacePage({
     const { id } = await params;
     const sp = (await searchParams) ?? {};
 
+    // system パラメータ（NAR/JRA）
+    const systemRaw = Array.isArray(sp.system) ? sp.system[0] : sp.system;
+    const system: RaceSystem = systemRaw === 'JRA' ? 'JRA' : 'NAR';
+
     // 予算パラメータ取得
     const budgetYen = Number(Array.isArray(sp.budgetYen) ? sp.budgetYen[0] : sp.budgetYen);
     const maxBets = Number(Array.isArray(sp.maxBets) ? sp.maxBets[0] : sp.maxBets);
     const dreamPct = Number(Array.isArray(sp.dreamPct) ? sp.dreamPct[0] : sp.dreamPct);
 
-    let race = await getRaceDetails(id);
+    let race = await getRaceDetails(id, system);
 
     if (!race) {
         return <div className="container">Race not found.</div>;
@@ -35,3 +40,4 @@ export default async function RacePage({
 
     return <RaceDetailView race={race} />;
 }
+

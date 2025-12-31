@@ -1,13 +1,7 @@
-import 'server-only'; // wait, client component cannot import server-only.
-// I switched to 'use client' because I need useEffect/fetch for API?
-// Or I can use Server Components for the list? 
-// Next 13 App Router: Page is server component by default.
-// I can make it async and fetch directly!
-// But then I can't use 'use client' logic unless I separate components.
-// For simplicity, I'll keep the page as Server Component and fetch data there.
+import 'server-only';
 
 import Link from 'next/link';
-// import { Race } from '@/lib/types';
+import { Race } from '@/lib/types';
 
 // Helper to fetch data on server
 async function getRacesServer(date: string) {
@@ -29,10 +23,26 @@ function parseDate(s: string): Date {
   return new Date(y, m, d);
 }
 
+// Group races by system
+function groupBySystem(races: Race[]): { nar: Race[]; jra: Race[] } {
+  const nar: Race[] = [];
+  const jra: Race[] = [];
+  for (const r of races) {
+    if (r.system === 'JRA') {
+      jra.push(r);
+    } else {
+      nar.push(r);
+    }
+  }
+  return { nar, jra };
+}
+
 export default async function Home({ searchParams }: { searchParams: Promise<{ date?: string }> }) {
   const params = await searchParams;
-  const dateStr = params.date || '20251231';
+  // デフォルトは今日or 20260105（JRAテスト用）
+  const dateStr = params.date || formatDate(new Date());
   const races = await getRacesServer(dateStr);
+  const { nar, jra } = groupBySystem(races);
 
   // Calculate Prev/Next
   const currentDate = parseDate(dateStr);
@@ -47,7 +57,7 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ d
     <main className="container">
       <div className="header">
         <h1>競馬シミュレーション</h1>
-        <p>Real-time Probabilities & EV Analysis</p>
+        <p>Real-time Probabilities & EV Analysis (NAR + JRA)</p>
 
         <div style={{ display: 'flex', justifyContent: 'center', gap: '20px', marginTop: '20px', alignItems: 'center' }}>
           <Link href={`/?date=${prevStr}`} style={{ color: 'var(--secondary)', textDecoration: 'none', fontSize: '1.1rem' }}>
@@ -62,21 +72,49 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ d
         </div>
       </div>
 
-      <div className="race-grid">
-        {races.map((race) => (
-          <Link href={`/races/${race.id}`} key={race.id} className="race-card glass">
-            <div className="race-time">{race.time}</div>
-            <div className="race-name">{race.name}</div>
-            <div className="race-meta">{race.course}</div>
-          </Link>
-        ))}
-        {races.length === 0 && (
-          <div className="glass" style={{ padding: '20px', textAlign: 'center', gridColumn: '1/-1' }}>
-            No races found for today (2025-12-31). Please check the date or source.
-            <br />(Target: Ohi/TCK via NAR)
+      {/* JRA Section */}
+      {jra.length > 0 && (
+        <>
+          <h2 style={{ marginTop: '30px', marginBottom: '15px', borderBottom: '2px solid #4caf50', paddingBottom: '8px' }}>
+            🏇 JRA (中央競馬) - {jra.length}レース
+          </h2>
+          <div className="race-grid">
+            {jra.map((race) => (
+              <Link href={`/races/${race.id}?system=JRA`} key={race.id} className="race-card glass" style={{ borderLeft: '4px solid #4caf50' }}>
+                <div className="race-time">{race.time}</div>
+                <div className="race-name">{race.name}</div>
+                <div className="race-meta">{race.course}</div>
+              </Link>
+            ))}
           </div>
-        )}
-      </div>
+        </>
+      )}
+
+      {/* NAR Section */}
+      {nar.length > 0 && (
+        <>
+          <h2 style={{ marginTop: '30px', marginBottom: '15px', borderBottom: '2px solid #ff9800', paddingBottom: '8px' }}>
+            🐴 NAR (地方競馬) - {nar.length}レース
+          </h2>
+          <div className="race-grid">
+            {nar.map((race) => (
+              <Link href={`/races/${race.id}?system=NAR`} key={race.id} className="race-card glass" style={{ borderLeft: '4px solid #ff9800' }}>
+                <div className="race-time">{race.time}</div>
+                <div className="race-name">{race.name}</div>
+                <div className="race-meta">{race.course}</div>
+              </Link>
+            ))}
+          </div>
+        </>
+      )}
+
+      {/* No races */}
+      {races.length === 0 && (
+        <div className="glass" style={{ padding: '20px', textAlign: 'center', marginTop: '30px' }}>
+          該当日のレースが見つかりません。日付を変更してください。
+          <br />(NAR + JRA 両方を検索済み)
+        </div>
+      )}
     </main>
   );
 }

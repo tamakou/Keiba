@@ -2,6 +2,8 @@
 
 export type BetType = '単勝' | '複勝' | 'ワイド' | '馬連' | '馬単' | '三連複' | '三連単';
 
+export type RaceSystem = 'NAR' | 'JRA';
+
 export interface DataSource {
     url: string;
     fetchedAtJst: string; // 例: "2025/12/31 10:25:12"
@@ -113,6 +115,9 @@ export interface Race {
 
     // 券種別オッズ
     oddsTables?: OddsTables;
+
+    // NAR/JRA区分
+    system?: RaceSystem;
 
     // 既存互換
     sourceUrl?: string;

@@ -2,12 +2,17 @@
 import { NextResponse } from 'next/server';
 import { getRaceDetails } from '@/lib/netkeiba';
 import { analyzeRace } from '@/lib/analysis';
+import { RaceSystem } from '@/lib/types';
 
 export const runtime = 'nodejs';
 
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
     const { id } = await params;
     const { searchParams } = new URL(request.url);
+
+    // system パラメータ（NAR/JRA）
+    const systemRaw = searchParams.get('system');
+    const system: RaceSystem = systemRaw === 'JRA' ? 'JRA' : 'NAR';
 
     // 可変予算パラメータ
     const budgetYen = Number(searchParams.get('budgetYen'));
@@ -16,7 +21,7 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
     const minUnitYen = Number(searchParams.get('minUnitYen'));
 
     try {
-        const race = await getRaceDetails(id);
+        const race = await getRaceDetails(id, system);
 
         if (!race) {
             return NextResponse.json({ error: 'Race not found' }, { status: 404 });

@@ -1,9 +1,12 @@
 // src/lib/oddsProvider.ts
 import * as cheerio from 'cheerio';
-import { BetType, DataSource, OddsEntry, OddsTable, OddsTables } from './types';
+import { BetType, DataSource, OddsEntry, OddsTable, OddsTables, RaceSystem } from './types';
 import { fetchHtmlAuto } from './htmlFetch';
 
-const BASE = 'https://nar.netkeiba.com';
+const BASES = {
+    NAR: 'https://nar.netkeiba.com',
+    JRA: 'https://race.netkeiba.com',
+} as const;
 
 const FALLBACK_TYPE_CODE: Partial<Record<BetType, string>> = {
     '単勝': 'b1',
@@ -15,8 +18,8 @@ const FALLBACK_TYPE_CODE: Partial<Record<BetType, string>> = {
     '三連単': 'b8',
 };
 
-function absUrl(href: string): string {
-    return new URL(href, BASE).toString();
+function absUrl(base: string, href: string): string {
+    return new URL(href, base).toString();
 }
 
 function parseOddsEntry(rawText: string): OddsEntry {
@@ -39,7 +42,7 @@ function parseOddsEntry(rawText: string): OddsEntry {
     return { raw, value: null, min: Math.min(a, b), max: Math.max(a, b) };
 }
 
-function findOddsUrlsFromIndex(html: string): Partial<Record<BetType, string>> {
+function findOddsUrlsFromIndex(html: string, base: string): Partial<Record<BetType, string>> {
     const $ = cheerio.load(html);
     const found: Partial<Record<BetType, string>> = {};
 
@@ -52,7 +55,7 @@ function findOddsUrlsFromIndex(html: string): Partial<Record<BetType, string>> {
 
         for (const t of targets) {
             if (!found[t] && text.includes(t)) {
-                found[t] = absUrl(href);
+                found[t] = absUrl(base, href);
             }
         }
     });
@@ -351,31 +354,35 @@ function parseOddsPage(type: BetType, html: string): Record<string, OddsEntry> {
     return {};
 }
 
-export async function fetchRaceOddsTables(raceId: string): Promise<{ tables: OddsTables; sources: DataSource[] }> {
+export async function fetchRaceOddsTables(
+    raceId: string,
+    system: RaceSystem = 'NAR'
+): Promise<{ tables: OddsTables; sources: DataSource[] }> {
     const sources: DataSource[] = [];
     const tables: OddsTables = {};
 
-    const indexUrl = `${BASE}/odds/index.html?race_id=${raceId}`;
+    const base = BASES[system];
+    const indexUrl = `${base}/odds/index.html?race_id=${raceId}`;
     let indexHtml = '';
 
     try {
         const idx = await fetchHtmlAuto(indexUrl);
         indexHtml = idx.html;
-        sources.push({ url: idx.url, fetchedAtJst: idx.fetchedAtJst, items: ['odds_index'] });
+        sources.push({ url: idx.url, fetchedAtJst: idx.fetchedAtJst, items: [`${system.toLowerCase()}_odds_index`] });
     } catch (e) {
-        sources.push({ url: indexUrl, fetchedAtJst: new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }), items: ['odds_index'], note: '取得失敗' });
+        sources.push({ url: indexUrl, fetchedAtJst: new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }), items: [`${system.toLowerCase()}_odds_index`], note: '取得失敗' });
         return { tables, sources };
     }
 
-    const foundUrls = findOddsUrlsFromIndex(indexHtml);
+    const foundUrls = findOddsUrlsFromIndex(indexHtml, base);
 
     const targets: BetType[] = ['単勝', '複勝', 'ワイド', '馬連', '馬単', '三連複', '三連単'];
 
     for (const t of targets) {
         let url = foundUrls[t] || (FALLBACK_TYPE_CODE[t] ? `${indexUrl}&type=${FALLBACK_TYPE_CODE[t]}` : null);
         if (!url) continue;
-        // 組み合わせ券種は人気順表示（housiki=c99）を取得するとパースしやすい
-        if (['ワイド', '馬連', '馬単', '三連複', '三連単'].includes(t) && !url.includes('housiki=')) {
+        // 組み合わせ券種は人気順表示（housiki=c99）を取得するとパースしやすい（NARのみ）
+        if (system === 'NAR' && ['ワイド', '馬連', '馬単', '三連複', '三連単'].includes(t) && !url.includes('housiki=')) {
             url += '&housiki=c99';
         }
 

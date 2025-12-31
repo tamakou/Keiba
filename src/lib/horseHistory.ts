@@ -1,10 +1,13 @@
 // src/lib/horseHistory.ts
 // 5走表示ページ (shutuba_past.html) から全馬の直近5走を一括取得
 import * as cheerio from 'cheerio';
-import { DataSource, Horse, HorseRun } from './types';
+import { DataSource, Horse, HorseRun, RaceSystem } from './types';
 import { fetchHtmlAuto } from './htmlFetch';
 
-const NAR_BASE = 'https://nar.netkeiba.com';
+const BASES = {
+    NAR: 'https://nar.netkeiba.com',
+    JRA: 'https://race.netkeiba.com',
+} as const;
 
 function trimText(text: string | undefined): string | null {
     const v = text?.trim()?.replace(/\s+/g, ' ');
@@ -73,9 +76,11 @@ function parseOneRun($: cheerio.CheerioAPI, pastCell: any): HorseRun | null {
  * 馬番をキーとしたMapを返す
  */
 export async function fetchAllHorsesLast5FromShutubaPast(
-    raceId: string
+    raceId: string,
+    system: RaceSystem = 'NAR'
 ): Promise<{ horseRunsMap: Map<number, HorseRun[]>; source: DataSource }> {
-    const url = `${NAR_BASE}/race/shutuba_past.html?race_id=${raceId}`;
+    const base = BASES[system];
+    const url = `${base}/race/shutuba_past.html?race_id=${raceId}`;
     const res = await fetchHtmlAuto(url);
     const source: DataSource = { url: res.url, fetchedAtJst: res.fetchedAtJst, items: ['shutuba_past'] };
 
@@ -137,10 +142,12 @@ export async function fetchAllHorsesLast5FromShutubaPast(
 export async function enrichHorsesLast5(
     horses: Horse[],
     raceSources: DataSource[],
-    raceId: string
+    raceId: string,
+    system: RaceSystem = 'NAR'
 ): Promise<void> {
+    const base = BASES[system];
     try {
-        const { horseRunsMap, source } = await fetchAllHorsesLast5FromShutubaPast(raceId);
+        const { horseRunsMap, source } = await fetchAllHorsesLast5FromShutubaPast(raceId, system);
         raceSources.push(source);
 
         for (const h of horses) {
@@ -149,7 +156,7 @@ export async function enrichHorsesLast5(
         }
     } catch (e) {
         raceSources.push({
-            url: `${NAR_BASE}/race/shutuba_past.html?race_id=${raceId}`,
+            url: `${base}/race/shutuba_past.html?race_id=${raceId}`,
             fetchedAtJst: new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }),
             items: ['shutuba_past'],
             note: '取得失敗',
