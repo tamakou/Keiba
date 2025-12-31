@@ -9,15 +9,11 @@ export default function RaceDetailView({ race }: { race: Race }) {
     const [isSimulating, setIsSimulating] = useState(false);
 
     const startSimulation = () => {
-        // Enhanced Probabilistic Simulation using Plackett-Luce-like weighted selection
         const simScores: { horse: Horse; score: number }[] = race.horses.map(h => {
             let score = h.estimatedProb;
-
-            // Random condition factor (80% to 120% of base)
             const conditionFactor = 0.8 + Math.random() * 0.4;
             score *= conditionFactor;
 
-            // Upset Factor (null-safe odds check)
             const odds = h.odds ?? 0;
             if (odds > 20) {
                 const upsetBonus = Math.random() * Math.random() * 0.3;
@@ -67,7 +63,6 @@ export default function RaceDetailView({ race }: { race: Race }) {
         }
     }
 
-    // Helper for displaying nullable values
     const displayProb = (v: number | null | undefined) => v == null ? '取得不可' : `${(v * 100).toFixed(1)}%`;
     const displayOdds = (v: number | null | undefined) => v == null ? '取得不可' : v.toFixed(1);
     const displayEv = (v: number | null | undefined) => v == null ? '取得不可' : `${(v * 100).toFixed(1)}%`;
@@ -84,7 +79,6 @@ export default function RaceDetailView({ race }: { race: Race }) {
                     Status: {dataLabel} {isPast ? '(Final Odds)' : ''}
                 </p>
 
-                {/* Strict Data Source Display */}
                 <div style={{
                     fontSize: '0.8rem',
                     color: '#888',
@@ -97,7 +91,9 @@ export default function RaceDetailView({ race }: { race: Race }) {
                 }}>
                     <span>
                         📊 Acquired at: <span style={{ color: '#fff' }}>
-                            {race.scrapedAt || '取得不可'}
+                            {race.scrapedAt
+                                ? new Date(race.scrapedAt).toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }) + ' JST'
+                                : '取得不可'}
                         </span>
                     </span>
                     <span>
@@ -111,12 +107,30 @@ export default function RaceDetailView({ race }: { race: Race }) {
                 </div>
             </div>
 
-            {/* Analysis Notes (Warnings) */}
+            {/* Analysis Notes */}
             {race.analysis?.notes && race.analysis.notes.length > 0 && (
                 <div className="glass" style={{ padding: '12px 16px', marginBottom: '20px', borderLeft: '4px solid #ff9800' }}>
                     <div style={{ fontWeight: 'bold', marginBottom: 6 }}>⚠️ データ取得/推定の注意</div>
                     <ul style={{ margin: 0, paddingLeft: 18 }}>
                         {race.analysis.notes.map((n, i) => <li key={i} style={{ color: '#ccc' }}>{n}</li>)}
+                    </ul>
+                </div>
+            )}
+
+            {/* Data Sources */}
+            {race.sources?.length > 0 && (
+                <div className="glass" style={{ padding: 12, marginBottom: 20 }}>
+                    <div style={{ fontWeight: 'bold', marginBottom: 6 }}>🔎 Data Sources ({race.sources.length})</div>
+                    <ul style={{ margin: 0, paddingLeft: 18, maxHeight: '150px', overflowY: 'auto' }}>
+                        {race.sources.map((s, i) => (
+                            <li key={i} style={{ marginBottom: 4, fontSize: '0.8rem' }}>
+                                <Link href={s.url} target="_blank" style={{ color: '#4da6ff' }}>
+                                    {s.items.join(', ')}
+                                </Link>
+                                <span style={{ color: '#aaa' }}> — {s.fetchedAtJst}</span>
+                                {s.note && <span style={{ color: '#ffcc00' }}> ({s.note})</span>}
+                            </li>
+                        ))}
                     </ul>
                 </div>
             )}
@@ -133,7 +147,7 @@ export default function RaceDetailView({ race }: { race: Race }) {
                             <th>My Top2%</th>
                             <th>My Top3%</th>
                             <th>EV(Win)</th>
-                            <th style={{ width: '25%' }}>Factors (3 Pts)</th>
+                            <th style={{ width: '25%' }}>Factors</th>
                         </tr>
                     </thead>
                     <tbody>
@@ -148,7 +162,7 @@ export default function RaceDetailView({ race }: { race: Race }) {
                                     <div style={{ fontWeight: 'bold', fontSize: '1.1rem' }}>{h.name}</div>
                                     <div style={{ fontSize: '0.8rem', color: '#aaa' }}>
                                         {h.weight}
-                                        {h.weightChange !== null && (
+                                        {h.weightChange != null && (
                                             <span style={{
                                                 marginLeft: '5px',
                                                 color: Math.abs(h.weightChange) >= 10 ? '#ff4444' : '#aaa'
@@ -157,6 +171,11 @@ export default function RaceDetailView({ race }: { race: Race }) {
                                             </span>
                                         )}
                                     </div>
+                                    {h.last5 && h.last5.length > 0 && (
+                                        <div style={{ fontSize: '0.7rem', color: '#888', marginTop: '2px' }}>
+                                            直近: {h.last5.slice(0, 3).map(r => r.finish ?? '-').join(' → ')}
+                                        </div>
+                                    )}
                                 </td>
                                 <td>
                                     <div>{h.jockey}</div>
@@ -180,8 +199,8 @@ export default function RaceDetailView({ race }: { race: Race }) {
                                     {displayProb(h.modelTop3Prob)}
                                 </td>
                                 <td style={{
-                                    color: (h.ev ?? -1) > 0 ? '#4caf50' : (h.ev ?? -1) > -0.1 ? '#fff' : '#ff4444',
-                                    fontWeight: (h.ev ?? -1) > 0 ? 'bold' : 'normal'
+                                    color: (h.ev ?? -999) > 0 ? '#4caf50' : (h.ev ?? -999) > -0.1 ? '#fff' : '#ff4444',
+                                    fontWeight: (h.ev ?? -999) > 0 ? 'bold' : 'normal'
                                 }}>
                                     {displayEv(h.ev)}
                                 </td>
@@ -206,7 +225,6 @@ export default function RaceDetailView({ race }: { race: Race }) {
                 </table>
                 <div style={{ marginTop: '20px', fontSize: '0.8rem', color: '#666', textAlign: 'right' }}>
                     * EV = (Estimated Prob × Odds) - 1. Positive EV suggests value bet.
-                    * Model uses simplified factors based on available data.
                 </div>
             </div>
 
@@ -251,23 +269,15 @@ export default function RaceDetailView({ race }: { race: Race }) {
                                                 <span style={{ fontWeight: 'bold', color: '#ffcc00' }}>
                                                     【{tip.type}】 {tip.selection.join('-')}
                                                 </span>
-                                                <span style={{ fontSize: '0.8rem', color: '#888' }}>
-                                                    ¥{tip.stakeYen?.toLocaleString() ?? '?'}
-                                                </span>
+                                                {tip.alloc && (
+                                                    <span style={{ fontSize: '0.8rem', color: '#888' }}>
+                                                        Alloc: {tip.alloc}%
+                                                    </span>
+                                                )}
                                             </div>
-                                            <div style={{ fontSize: '0.8rem', color: '#aaa', marginBottom: '5px' }}>
+                                            <div style={{ fontSize: '0.8rem', color: '#aaa' }}>
                                                 {tip.reason}
                                             </div>
-                                            {(tip.prob != null || tip.ev != null) && (
-                                                <div style={{ fontSize: '0.75rem', color: '#666' }}>
-                                                    {tip.prob != null && <span>確率: {(tip.prob * 100).toFixed(1)}% </span>}
-                                                    {tip.ev != null && (
-                                                        <span style={{ color: tip.ev > 0 ? '#4caf50' : '#ff4444' }}>
-                                                            EV: {(tip.ev * 100).toFixed(1)}%
-                                                        </span>
-                                                    )}
-                                                </div>
-                                            )}
                                         </div>
                                     ))}
                                 </div>

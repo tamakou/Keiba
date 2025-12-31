@@ -2,6 +2,8 @@ import { NextResponse } from 'next/server';
 import { getRaceDetails } from '@/lib/netkeiba';
 import { analyzeRace } from '@/lib/analysis';
 
+export const runtime = 'nodejs';
+
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
     // Await params if Next.js 15+ 
     const { id } = await params;

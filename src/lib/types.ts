@@ -1,40 +1,40 @@
-export type DataItem =
-    | 'race_meta'
-    | 'entries'
-    | 'win_place_odds'
-    | 'other_odds'
-    | 'horse_history';
+// src/lib/types.ts
+
+export type BetType = '単勝' | '複勝' | 'ワイド' | '馬連' | '馬単' | '三連複' | '三連単';
 
 export interface DataSource {
     url: string;
-    fetchedAtJst: string;
-    items: DataItem[];
+    fetchedAtJst: string; // 例: "2025/12/31 10:25:12"
+    items: string[];      // 例: ["race_meta", "entries", "odds:単勝"]
     note?: string;
 }
 
-export interface Race {
-    id: string;
-    name: string;
+export interface OddsEntry {
+    raw: string;          // セルの生文字列
+    value: number | null; // 単一オッズ（単勝/ワイド等）
+    min: number | null;   // 複勝レンジ等
+    max: number | null;
+}
 
-    // レース基本情報（取れない時は必ず "取得不可"）
-    date?: string;
-    time: string;
-    course: string;
-    weather: string;
-    baba: string;
+export interface OddsTable {
+    type: BetType;
+    url: string;
+    fetchedAtJst: string;
+    odds: Record<string, OddsEntry>; // key: 単勝/複勝は "馬番"、ワイド/馬連は "1-2"、三連複は "1-2-3"、三連単は "1>2>3"
+    note?: string;
+}
 
-    horses: Horse[];
+export type OddsTables = Partial<Record<BetType, OddsTable>>;
 
-    // 取得元の証跡
-    sources: DataSource[];
-
-    // 互換用
-    sourceUrl?: string;
-    scrapedAt?: string;
-
-    // 分析結果
-    analysis?: RaceAnalysis;
-    portfolios?: BettingPortfolio[];
+export interface HorseRun {
+    date: string | null;
+    venue: string | null;
+    raceName: string | null;
+    class: string | null;
+    surfaceDistance: string | null; // 例: "ダ1600"
+    finish: string | null;          // 例: "1"
+    time: string | null;            // 走破タイム
+    last3f: string | null;          // 上がり
 }
 
 export interface Horse {
@@ -45,63 +45,43 @@ export interface Horse {
     jockey: string;
     trainer: string;
 
-    weight: string;
-    weightChange: number | null;
+    weight: string;              // 取れなければ "取得不可"
+    weightChange: number | null; // 欠損は null
 
-    // 単勝オッズ（取れない場合は null）
-    odds: number | null;
-
+    odds: number | null;         // 単勝（欠損 null）
     popularity: number | null;
 
-    // 直近5走（取れないなら null）
-    last5: string[] | null;
+    horseUrl: string | null;     // 直近5走取得用
+    last5: HorseRun[] | null;    // 欠損 null
 
-    // 市場確率（単勝から。全頭揃わなければ null）
-    marketProb: number | null;
+    marketProb: number | null;   // 市場勝率（全頭揃わなければ null）
+    estimatedProb: number;       // あなた推定（必ず正規化）
+    ev: number | null;           // 単勝EV（oddsが無ければ null）
 
-    // モデル勝率
-    estimatedProb: number;
-
-    // 期待値（単勝EV。オッズ取れない場合は null）
-    ev: number | null;
-
-    // 根拠3点
     factors: string[];
+    upsetIndex?: number;
 
-    // シミュレーション由来の Top2/Top3
+    // Monte Carlo結果（互換用）
     modelTop2Prob?: number | null;
     modelTop3Prob?: number | null;
     marketTop2Prob?: number | null;
     marketTop3Prob?: number | null;
-
-    // 穴馬指数
-    upsetIndex?: number;
 }
-
-export type BetType =
-    | '単勝'
-    | '複勝'
-    | 'ワイド'
-    | '馬連'
-    | '三連複'
-    | '三連単';
 
 export interface BettingTip {
     type: BetType;
     selection: number[];
     confidence: number;
     reason: string;
-
+    alloc?: number; // 既存互換（%）
+    stakeYen?: number;
     odds?: number | null;
     prob?: number | null;
     ev?: number | null;
-
-    stakeYen?: number;
-    alloc?: number;
 }
 
 export interface BettingPortfolio {
-    id: 'conservative' | 'balanced' | 'dream';
+    id: string;
     name: string;
     description: string;
     scenario?: string;
@@ -114,4 +94,31 @@ export interface RaceAnalysis {
     notes: string[];
     marketAvailable: boolean;
     modelAvailable: boolean;
+}
+
+export interface Race {
+    id: string;
+    name: string;
+    date?: string;
+
+    time: string;   // 取れなければ "取得不可"
+    course: string; // 取れなければ "取得不可"
+    weather: string;
+    baba: string;
+
+    horses: Horse[];
+
+    // 取得証跡
+    sources: DataSource[];
+
+    // 券種別オッズ
+    oddsTables?: OddsTables;
+
+    // 既存互換
+    sourceUrl?: string;
+    scrapedAt?: string; // ISO推奨
+
+    // 分析結果
+    analysis?: RaceAnalysis;
+    portfolios?: BettingPortfolio[];
 }
