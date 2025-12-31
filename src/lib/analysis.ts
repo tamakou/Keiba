@@ -2,6 +2,7 @@
 import { Race, Horse, BettingPortfolio, BettingTip, BetType } from './types';
 import { estimateFinishProbs, estimateBetEventProbs, FinishProbs, BetEventProbs } from './simulator';
 import { buildOptimizedPortfolios, OptimizeSettings } from './optimizer';
+import { computeModelV2 } from './modelV2';
 
 export interface AnalyzeOptions {
     budgetYen?: number;   // 可変
@@ -169,45 +170,31 @@ export function analyzeRace(race: Race, opts: AnalyzeOptions = {}): Race {
         horses.forEach(h => { h.marketProb = null; });
     }
 
-    // 推定確率（現状ロジック）
-    let sumScore = 0;
-    const equalProb = horses.length ? 1 / horses.length : 0;
+    // --- 推定確率（Model v2: last5/馬場/距離/脚質ベース） ---
+    const v2 = computeModelV2(race);
+    notes.push(...v2.notes);
 
-    horses.forEach(h => {
-        const baseScore = (h.odds != null && h.odds > 0) ? (100 / h.odds) : 10;
-        let multiplier = 1.0;
-        const factors: string[] = [];
-
-        if (h.gate > 0 && h.gate <= 2) { multiplier += 0.05; factors.push('好枠(内)'); }
-        else if (h.gate >= 7 && horses.length > 10) { multiplier -= 0.03; factors.push('外枠'); }
-
-        if (h.weightChange != null) {
-            if (Math.abs(h.weightChange) <= 2) { multiplier += 0.02; factors.push('馬体安定'); }
-            else if (h.weightChange >= 10) { multiplier -= 0.1; factors.push(`馬体増+${h.weightChange}kg`); }
-            else if (h.weightChange <= -10) { multiplier -= 0.1; factors.push(`馬体減${h.weightChange}kg`); }
-        } else {
-            factors.push('馬体増減:取得不可');
-        }
-
-        const topJockeys = ['御神本', '笹川翼', '矢野', '本田正', 'ルメール', '川田', 'デムーロ', '森泰斗'];
-        if (h.jockey !== '取得不可' && topJockeys.some(j => h.jockey.includes(j))) { multiplier += 0.1; factors.push('有力騎手'); }
-
-        const o = h.odds ?? 0;
-        let upsetIndex = 0;
-        if (o >= 50) { upsetIndex = 0.8; factors.push('大穴候補 ★★★'); }
-        else if (o >= 30) { upsetIndex = 0.5; factors.push('穴馬候補 ★★'); }
-        else if (o >= 15) { upsetIndex = 0.3; factors.push('中穴 ★'); }
-        h.upsetIndex = upsetIndex;
-
-        h.estimatedProb = baseScore * multiplier;
-        h.factors = factors.slice(0, 3);
-        sumScore += h.estimatedProb;
-    });
-
-    horses.forEach(h => {
-        h.estimatedProb = sumScore > 0 ? (h.estimatedProb / sumScore) : equalProb;
+    horses.forEach((h, i) => {
+        h.estimatedProb = v2.probs[i];
+        h.factors = v2.factorStrings[i];
+        // オッズがある時だけEV計算
         h.ev = (h.odds != null && h.odds > 0) ? (h.estimatedProb * h.odds - 1) : null;
+        // フェアオッズ（オッズ無し時の参考用）
+        h.fairOdds = h.estimatedProb > 0 ? 1 / h.estimatedProb : null;
     });
+
+    // upsetIndex: 確率順位で"穴っぽさ"を作る（dream選定用）
+    const sorted = [...horses].map((h, i) => ({ i, p: h.estimatedProb })).sort((a, b) => b.p - a.p);
+    sorted.forEach((x, rank) => {
+        // 上位3は0、4〜8は0.3、9位以下は0.6（dreamで拾いやすく）
+        const idx = rank <= 2 ? 0 : rank <= 7 ? 0.3 : 0.6;
+        horses[x.i].upsetIndex = idx;
+    });
+
+    // オッズなし時のメッセージ
+    if (!allOddsAvailable) {
+        notes.push('Model v2: オッズ不完全のため確率ベース分析（フェアオッズ=1/probを参照）');
+    }
 
     // Monte Carlo（Top2/Top3）
     const iterations = 20000;

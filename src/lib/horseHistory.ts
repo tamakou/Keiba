@@ -42,16 +42,24 @@ function parseOneRun($: cheerio.CheerioAPI, pastCell: any): HorseRun | null {
     const data05Text = trimText(pastCell.find('.Data05').text());
     let surfaceDistance: string | null = null;
     let time: string | null = null;
+    let baba: string | null = null;
     if (data05Text) {
         const parts = data05Text.split(/\s+/);
         if (parts.length >= 1) surfaceDistance = parts[0]; // ダ1400
         if (parts.length >= 2) time = parts[1]; // 1:30.1
+        if (parts.length >= 3) baba = parts[2]; // 不/重/良/稍 等
     }
 
     // Data06: 通過順・上り・馬体重 (例: "2-2-1-1 (40.2) 469(-3)")
     const data06Text = trimText(pastCell.find('.Data06').text());
     let last3f: string | null = null;
+    let passing: string | null = null;
     if (data06Text) {
+        // 通過順（先頭の "2-2-1-1" だけ抜く）
+        const passMatch = data06Text.match(/^(\d{1,2}(?:-\d{1,2}){1,3})/);
+        if (passMatch) passing = passMatch[1];
+
+        // 上がり（括弧内）
         const last3fMatch = data06Text.match(/\((\d+\.?\d*)\)/);
         if (last3fMatch) last3f = last3fMatch[1];
     }
@@ -68,6 +76,8 @@ function parseOneRun($: cheerio.CheerioAPI, pastCell: any): HorseRun | null {
         finish,
         time,
         last3f,
+        baba,
+        passing,
     };
 }
 

@@ -207,6 +207,7 @@ async function getRaceDetailsNar(raceId: string): Promise<Race | null> {
             marketProb: null,
             estimatedProb: 0,
             ev: null,
+            fairOdds: null,
             factors: [],
         });
     });
@@ -429,6 +430,7 @@ async function getRaceDetailsJra(raceId: string): Promise<Race | null> {
             marketProb: null,
             estimatedProb: 0,
             ev: null,
+            fairOdds: null,
             factors: [],
         });
     });

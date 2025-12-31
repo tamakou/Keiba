@@ -37,6 +37,8 @@ export interface HorseRun {
     finish: string | null;          // 例: "1"
     time: string | null;            // 走破タイム
     last3f: string | null;          // 上がり
+    baba: string | null;            // 馬場状態: "良/稍/重/不"
+    passing: string | null;         // 通過順: "2-2-1-1"
 }
 
 export interface Horse {
@@ -59,6 +61,7 @@ export interface Horse {
     marketProb: number | null;   // 市場勝率（全頭揃わなければ null）
     estimatedProb: number;       // あなた推定（必ず正規化）
     ev: number | null;           // 単勝EV（oddsが無ければ null）
+    fairOdds: number | null;     // フェアオッズ = 1/estimatedProb
 
     factors: string[];
     upsetIndex?: number;
