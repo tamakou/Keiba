@@ -1,0 +1,11 @@
+
+> app@0.1.0 lint
+> eslint
+
+
+C:\Users\tamak\OneDrive\繝・せ繧ｯ繝医ャ繝予Keiba\src\app\api\races\[id]\route.ts
+  3:10  warning  'Race' is defined but never used   @typescript-eslint/no-unused-vars
+  3:16  warning  'Horse' is defined but never used  @typescript-eslint/no-unused-vars
+
+笨・2 problems (0 errors, 2 warnings)
+

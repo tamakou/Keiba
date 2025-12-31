@@ -1,0 +1,25 @@
+
+> app@0.1.0 lint
+> eslint
+
+
+C:\Users\tamak\OneDrive\繝・せ繧ｯ繝医ャ繝予Keiba\convert-debug.js
+  2:12  error  A `require()` style import is forbidden  @typescript-eslint/no-require-imports
+  3:15  error  A `require()` style import is forbidden  @typescript-eslint/no-require-imports
+
+C:\Users\tamak\OneDrive\繝・せ繧ｯ繝医ャ繝予Keiba\src\app\api\races\[id]\route.ts
+  3:10  warning  'Race' is defined but never used   @typescript-eslint/no-unused-vars
+  3:16  warning  'Horse' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\tamak\OneDrive\繝・せ繧ｯ繝医ャ繝予Keiba\src\app\page.tsx
+  10:10  warning  'Race' is defined but never used  @typescript-eslint/no-unused-vars
+
+C:\Users\tamak\OneDrive\繝・せ繧ｯ繝医ャ繝予Keiba\src\components\RaceDetailView.tsx
+  34:17  error  Do not use an `<a>` element to navigate to `/`. Use `<Link />` from `next/link` instead. See: https://nextjs.org/docs/messages/no-html-link-for-pages  @next/next/no-html-link-for-pages
+
+C:\Users\tamak\OneDrive\繝・せ繧ｯ繝医ャ繝予Keiba\src\lib\netkeiba.ts
+   19:15  warning  'decoder' is assigned a value but never used  @typescript-eslint/no-unused-vars
+  115:11  warning  'rows' is assigned a value but never used     @typescript-eslint/no-unused-vars
+
+笨・8 problems (3 errors, 5 warnings)
+
