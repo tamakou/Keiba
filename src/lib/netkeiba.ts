@@ -79,6 +79,7 @@ function parseRaceListHtmlNar(html: string, url: string, fetchedAt: string, date
                 course,
                 weather: '取得不可',
                 baba: '取得不可',
+                venue: '取得不可',
                 horses: [],
                 sources: [{ url, fetchedAtJst: fetchedAt, items: ['nar_race_list'] }],
                 system: 'NAR',
@@ -109,6 +110,7 @@ function parseRaceListHtmlNar(html: string, url: string, fetchedAt: string, date
                             course: '取得不可',
                             weather: '取得不可',
                             baba: '取得不可',
+                            venue: '取得不可',
                             horses: [],
                             sources: [{ url, fetchedAtJst: fetchedAt, items: ['nar_race_list'] }],
                             system: 'NAR',
@@ -146,6 +148,7 @@ async function getRaceDetailsNar(raceId: string): Promise<Race | null> {
     let baba = '取得不可';
     let time = '取得不可';
     let course = '取得不可';
+    let venue = '取得不可';
 
     if (metaText) {
         const parts = metaText.split('/').map(s => s.trim());
@@ -155,6 +158,14 @@ async function getRaceDetailsNar(raceId: string): Promise<Race | null> {
             if (p.includes('天候')) weather = (p.split(':')[1] || p).trim() || '取得不可';
             if (p.includes('馬場')) baba = (p.split(':')[1] || p).trim() || '取得不可';
         });
+    }
+
+    // RaceData02からvenue（開催場）を取得
+    const meta02Text = $('.RaceData02').text().trim();
+    if (meta02Text) {
+        // NAR: "大井　1回5日" のような形式
+        const venueMatch = meta02Text.match(/^([\u4e00-\u9fa5ア-ンー]+)/);
+        if (venueMatch) venue = venueMatch[1];
     }
 
     const horses: Horse[] = [];
@@ -243,6 +254,7 @@ async function getRaceDetailsNar(raceId: string): Promise<Race | null> {
         course,
         weather,
         baba,
+        venue,
         horses,
         sources,
         oddsTables: oddsRes.tables,
@@ -295,6 +307,7 @@ async function getRaceListJra(date: string): Promise<Race[]> {
             course,
             weather: '取得不可',
             baba: '取得不可',
+            venue: '取得不可',
             horses: [],
             sources,
             system: 'JRA',
@@ -320,6 +333,7 @@ async function getRaceListJra(date: string): Promise<Race[]> {
                         course: '取得不可',
                         weather: '取得不可',
                         baba: '取得不可',
+                        venue: '取得不可',
                         horses: [],
                         sources: [{ url: res.url, fetchedAtJst: res.fetchedAtJst, items: ['jra_race_list'], note: 'フォールバック抽出' }],
                         system: 'JRA',
@@ -358,6 +372,7 @@ async function getRaceDetailsJra(raceId: string): Promise<Race | null> {
     let baba = '取得不可';
     let time = '取得不可';
     let course = '取得不可';
+    let venue = '取得不可';
 
     if (metaText) {
         const parts = metaText.split('/').map(s => s.trim());
@@ -367,6 +382,14 @@ async function getRaceDetailsJra(raceId: string): Promise<Race | null> {
             if (p.includes('天候')) weather = (p.split(':')[1] || p).trim() || '取得不可';
             if (p.includes('馬場')) baba = (p.split(':')[1] || p).trim() || '取得不可';
         });
+    }
+
+    // RaceData02からvenue（開催場）を取得
+    const meta02Text = $('.RaceData02').text().trim();
+    if (meta02Text) {
+        // JRA: "中山 1回5日" のような形式
+        const venueMatch = meta02Text.match(/^([\u4e00-\u9fa5ア-ンー]+)/);
+        if (venueMatch) venue = venueMatch[1];
     }
 
     const horses: Horse[] = [];
@@ -466,6 +489,7 @@ async function getRaceDetailsJra(raceId: string): Promise<Race | null> {
         course,
         weather,
         baba,
+        venue,
         horses,
         sources,
         oddsTables: oddsRes.tables,

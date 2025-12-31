@@ -4,6 +4,7 @@
 
 import { Race, Horse, HorseRun } from './types';
 import { normalizeBaba, parseRaceCourse, parseSurfaceDistance, Surface, Baba } from './courseParse';
+import { findCourseProfile, estimatePaceIndex, CourseProfile } from './courseProfiles';
 
 // ============================================================================
 // ユーティリティ
@@ -193,6 +194,26 @@ export function computeModelV2(race: Race): ModelV2Result {
     for (const [k, v] of jAgg.entries()) jockeyMean.set(k, v.sum / v.n);
     for (const [k, v] of tAgg.entries()) trainerMean.set(k, v.sum / v.n);
 
+    // コースプロファイル検索
+    const courseProfile = findCourseProfile({ venue: race.venue, surface, distance, direction });
+    if (courseProfile) {
+        notes.push(`コースプロファイル: ${courseProfile.venue} ${courseProfile.surface}${courseProfile.distance}m 内bias=${courseProfile.insideBias} 前bias=${courseProfile.frontBias}`);
+    } else {
+        notes.push('コースプロファイル: 該当データなし（デフォルトバイアス使用）');
+    }
+
+    // ペース推定（脚質分布から）
+    const styleDistribution = { front: 0, stalker: 0, mid: 0, closer: 0 };
+    perHorse.forEach(h => {
+        const s = h.style.style;
+        if (s === 'Front') styleDistribution.front++;
+        else if (s === 'Stalker') styleDistribution.stalker++;
+        else if (s === 'Mid') styleDistribution.mid++;
+        else if (s === 'Closer') styleDistribution.closer++;
+    });
+    const paceIndex = clamp(estimatePaceIndex(styleDistribution), -1, 1);
+    notes.push(`ペース推定: ${paceIndex.toFixed(2)} (前${styleDistribution.front}/先${styleDistribution.stalker}/中${styleDistribution.mid}/差${styleDistribution.closer})`);
+
     // 距離×脚質バイアス
     const isSprint = distance != null && distance <= 1400;
     const isLong = distance != null && distance >= 2000;
@@ -205,12 +226,21 @@ export function computeModelV2(race: Race): ModelV2Result {
         const factors: { label: string; delta: number }[] = [];
         let logS = 0;
 
-        // 1) 枠（内外）
+        // 1) 枚（内外）+ コースバイアス
         if (h.gate > 0) {
+            const insideBias = courseProfile?.insideBias ?? 0.1; // デフォルトは軽い内有利
             const inside = h.gate <= 2;
             const outside = h.gate >= 7 && horses.length > 10;
-            if (inside) { logS += 0.05; factors.push({ label: '内枠', delta: +0.05 }); }
-            if (outside) { logS -= 0.03; factors.push({ label: '外枠', delta: -0.03 }); }
+            if (inside) {
+                const d = 0.03 + insideBias * 0.05;
+                logS += d;
+                factors.push({ label: '内枚', delta: d });
+            }
+            if (outside) {
+                const d = -0.02 - insideBias * 0.03;
+                logS += d;
+                factors.push({ label: '外枚', delta: d });
+            }
         }
 
         // 2) 馬体増減
@@ -259,14 +289,31 @@ export function computeModelV2(race: Race): ModelV2Result {
             factors.push({ label: '重馬場適性', delta: d });
         }
 
-        // 7) 脚質×距離バイアス
+        // 7) 脚質×距離バイアス + コースfrontBias + ペース
         const st = perHorse[i].style.style;
+        const frontBias = courseProfile?.frontBias ?? 0;
+        // ベース効果
+        let styleD = 0;
         if (isSprint) {
-            const d = st === 'Front' ? +0.08 : st === 'Stalker' ? +0.03 : st === 'Closer' ? -0.05 : 0;
-            if (d !== 0) { logS += d; factors.push({ label: '脚質(短距離)', delta: d }); }
+            styleD = st === 'Front' ? +0.08 : st === 'Stalker' ? +0.03 : st === 'Closer' ? -0.05 : 0;
         } else if (isLong) {
-            const d = st === 'Closer' ? +0.05 : st === 'Front' ? -0.03 : 0;
-            if (d !== 0) { logS += d; factors.push({ label: '脚質(長距離)', delta: d }); }
+            styleD = st === 'Closer' ? +0.05 : st === 'Front' ? -0.03 : 0;
+        }
+        // コースfrontBias上乗せ
+        if (st === 'Front' || st === 'Stalker') {
+            styleD += frontBias * 0.06;
+        } else if (st === 'Mid' || st === 'Closer') {
+            styleD -= frontBias * 0.04;
+        }
+        // ペース上乗せ（ハイペースなら差し有利）
+        if (st === 'Closer') {
+            styleD += paceIndex * 0.05;
+        } else if (st === 'Front') {
+            styleD -= paceIndex * 0.04;
+        }
+        if (styleD !== 0) {
+            logS += styleD;
+            factors.push({ label: '脚質×コース', delta: styleD });
         }
 
         // 8) 騎手（統計代理）

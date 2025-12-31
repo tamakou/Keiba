@@ -110,6 +110,7 @@ export interface Race {
     course: string; // 取れなければ "取得不可"
     weather: string;
     baba: string;
+    venue: string;   // 競馬場名: 中山/東京/京都/阪神/大井 等
 
     horses: Horse[];
 
