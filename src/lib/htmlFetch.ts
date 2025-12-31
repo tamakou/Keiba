@@ -15,10 +15,15 @@ export async function fetchHtmlAuto(url: string): Promise<FetchHtmlResult> {
     const res = await fetch(url, {
         cache: 'no-store',
         headers: {
-            'User-Agent': 'Mozilla/5.0 (compatible; KeibaSim/1.0)',
+            'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
             'Accept-Language': 'ja-JP,ja;q=0.9,en-US;q=0.8,en;q=0.7',
         },
     });
+
+    const finalUrl = res.url || url;
+    if (!res.ok) {
+        throw new Error(`HTTP ${res.status} ${res.statusText} (${finalUrl})`);
+    }
 
     const ab = await res.arrayBuffer();
     const buf = Buffer.from(ab);
@@ -39,5 +44,5 @@ export async function fetchHtmlAuto(url: string): Promise<FetchHtmlResult> {
         html = utf.includes('�') ? iconv.decode(buf, 'EUC-JP') : utf;
     }
 
-    return { url, html, fetchedAtJst: nowJstString() };
+    return { url: finalUrl, html, fetchedAtJst: nowJstString() };
 }

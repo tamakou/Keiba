@@ -1,5 +1,7 @@
 // src/lib/oddsProvider.ts
 import * as cheerio from 'cheerio';
+import fs from 'fs';
+import path from 'path';
 import { BetType, DataSource, OddsEntry, OddsTable, OddsTables, RaceSystem } from './types';
 import { fetchHtmlAuto } from './htmlFetch';
 
@@ -63,7 +65,41 @@ function findOddsUrlsFromIndex(html: string, base: string): Partial<Record<BetTy
     return found;
 }
 
-function parseSingleOdds(html: string): Record<string, OddsEntry> {
+/** オッズページの状態を検出（発売前/アクセス拒否等） */
+function detectOddsPageState(html: string): string | null {
+    const t = html.replace(/\s+/g, '');
+    if (/発売前|発売開始前|未発売|準備中|データがありません/.test(t)) return '発売前/未発売の可能性';
+    if (/403Forbidden|AccessDenied|captcha|ロボット|不正なアクセス/.test(t)) return 'アクセス拒否/ブロックの可能性';
+    return null;
+}
+
+/** デバッグ用HTML保存（環境変数 KEIBA_DEBUG_SAVE_HTML がある場合） */
+function maybeSaveDebugHtml(system: RaceSystem, raceId: string, type: BetType, html: string): void {
+    if (!process.env.KEIBA_DEBUG_SAVE_HTML) return;
+    try {
+        const dir = path.join(process.cwd(), '.keiba_debug');
+        fs.mkdirSync(dir, { recursive: true });
+        const safeType = type.replace(/[\/\\:*?"<>|]/g, '_');
+        const p = path.join(dir, `${system}_${raceId}_${safeType}.html`);
+        fs.writeFileSync(p, html);
+    } catch {
+        // ignore
+    }
+}
+
+/** 単勝/複勝のオッズセルを選択（複勝はレンジ表記を優先） */
+function pickSingleOddsCell(type: BetType, cells: string[]): string | null {
+    const cands = cells.filter(c => /\d/.test(c) && (c.includes('.') || c.includes('〜') || c.includes('～') || c.includes('-')));
+    if (cands.length === 0) return null;
+    if (type === '複勝') {
+        // 複勝はレンジ表記（〜/～/ハイフン）が多いのでそれを優先
+        return cands.find(c => c.includes('〜') || c.includes('～') || c.includes('-')) ?? cands[cands.length - 1];
+    }
+    // 単勝はレンジでない小数を優先
+    return cands.find(c => c.includes('.') && !(c.includes('〜') || c.includes('～'))) ?? cands[0];
+}
+
+function parseSingleOdds(html: string, type: BetType = '単勝'): Record<string, OddsEntry> {
     const $ = cheerio.load(html);
     const odds: Record<string, OddsEntry> = {};
 
@@ -76,11 +112,11 @@ function parseSingleOdds(html: string): Record<string, OddsEntry> {
         const num = parseInt(numCell, 10);
         if (!(num >= 1 && num <= 20)) return;
 
-        // oddsっぽいセル
-        const oddsCell = cells.find(c => /\d/.test(c) && (c.includes('.') || c.includes('〜') || c.includes('～') || c.includes('-')));
-        if (!oddsCell) return;
+        // 単勝/複勝に応じたセル選択
+        const picked = pickSingleOddsCell(type, cells);
+        if (!picked) return;
 
-        const entry = parseOddsEntry(oddsCell);
+        const entry = parseOddsEntry(picked);
         if (entry.value !== null || entry.min !== null) {
             odds[String(num)] = entry;
         }
@@ -339,7 +375,7 @@ function parseOddsListTable(html: string, type: BetType): Record<string, OddsEnt
 
 
 function parseOddsPage(type: BetType, html: string): Record<string, OddsEntry> {
-    if (type === '単勝' || type === '複勝') return parseSingleOdds(html);
+    if (type === '単勝' || type === '複勝') return parseSingleOdds(html, type);
     // 組み合わせ券種は人気順リスト形式をパース
     if (['ワイド', '馬連', '馬単', '三連複', '三連単'].includes(type)) {
         const result = parseOddsListTable(html, type);
@@ -390,9 +426,17 @@ export async function fetchRaceOddsTables(
             const res = await fetchHtmlAuto(url);
             sources.push({ url: res.url, fetchedAtJst: res.fetchedAtJst, items: [`odds:${t}`] });
 
+            // 発売前/アクセス拒否の検出
+            const state = detectOddsPageState(res.html);
+            if (state) {
+                tables[t] = { type: t, url: res.url, fetchedAtJst: res.fetchedAtJst, odds: {}, note: state };
+                continue;
+            }
+
             const odds = parseOddsPage(t, res.html);
             if (Object.keys(odds).length === 0) {
-                tables[t] = { type: t, url: res.url, fetchedAtJst: res.fetchedAtJst, odds: {}, note: 'パース結果が空（HTML構造要調整の可能性）' };
+                maybeSaveDebugHtml(system, raceId, t, res.html);
+                tables[t] = { type: t, url: res.url, fetchedAtJst: res.fetchedAtJst, odds: {}, note: 'パース結果が空（未発売/HTML構造/ブロック等の可能性）' };
             } else {
                 tables[t] = { type: t, url: res.url, fetchedAtJst: res.fetchedAtJst, odds };
             }
