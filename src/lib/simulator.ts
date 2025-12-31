@@ -1,5 +1,4 @@
 // src/lib/simulator.ts
-// Monte Carlo / Plackett-Luce simulation for finish position probabilities
 
 export interface FinishProbs {
     win: number[];
@@ -8,9 +7,11 @@ export interface FinishProbs {
 }
 
 export interface BetEventProbs {
-    wideTopK: Record<string, number>;
-    umaren: Record<string, number>;
-    sanrenpuku: Record<string, number>;
+    wideTopK: Record<string, number>;     // ワイド（両方複勝圏TopK）
+    umaren: Record<string, number>;       // 馬連（1-2着どちらでも）
+    sanrenpuku: Record<string, number>;   // 三連複（1-3着どれでも）
+    umatan: Record<string, number>;       // 馬単（1>2）
+    sanrentan: Record<string, number>;    // 三連単（1>2>3）
 }
 
 function weightedPickIndex(weights: number[], rng: () => number): number {
@@ -55,11 +56,13 @@ export function estimateFinishProbs(weights: number[], iterations: number, rng: 
     for (let t = 0; t < iterations; t++) {
         const order = sampleOrderPlackettLuce(weights, rng);
         if (order.length > 0) win[order[0]] += 1;
-        if (order.length > 0) { top2[order[0]] += 1; }
-        if (order.length > 1) { top2[order[1]] += 1; }
-        if (order.length > 0) { top3[order[0]] += 1; }
-        if (order.length > 1) { top3[order[1]] += 1; }
-        if (order.length > 2) { top3[order[2]] += 1; }
+
+        if (order.length > 0) top2[order[0]] += 1;
+        if (order.length > 1) top2[order[1]] += 1;
+
+        if (order.length > 0) top3[order[0]] += 1;
+        if (order.length > 1) top3[order[1]] += 1;
+        if (order.length > 2) top3[order[2]] += 1;
     }
 
     for (let i = 0; i < n; i++) {
@@ -74,10 +77,15 @@ export function estimateFinishProbs(weights: number[], iterations: number, rng: 
 function key2(a: number, b: number): string {
     return a < b ? `${a}-${b}` : `${b}-${a}`;
 }
-
 function key3(a: number, b: number, c: number): string {
     const arr = [a, b, c].sort((x, y) => x - y);
     return `${arr[0]}-${arr[1]}-${arr[2]}`;
+}
+function key2o(a: number, b: number): string {
+    return `${a}>${b}`;
+}
+function key3o(a: number, b: number, c: number): string {
+    return `${a}>${b}>${c}`;
 }
 
 export function estimateBetEventProbs(
@@ -90,12 +98,14 @@ export function estimateBetEventProbs(
     const wideTopK: Record<string, number> = {};
     const umaren: Record<string, number> = {};
     const sanrenpuku: Record<string, number> = {};
+    const umatan: Record<string, number> = {};
+    const sanrentan: Record<string, number> = {};
 
     for (let t = 0; t < iterations; t++) {
         const order = sampleOrderPlackettLuce(weights, rng);
 
+        // ワイド（複勝圏TopK）
         const placed = order.slice(0, topKForPlace).map(i => horseNumbers[i]);
-
         for (let i = 0; i < placed.length; i++) {
             for (let j = i + 1; j < placed.length; j++) {
                 const k = key2(placed[i], placed[j]);
@@ -103,22 +113,29 @@ export function estimateBetEventProbs(
             }
         }
 
+        // 1-2着
         if (order.length >= 2) {
-            const first2 = [horseNumbers[order[0]], horseNumbers[order[1]]];
-            const k = key2(first2[0], first2[1]);
-            umaren[k] = (umaren[k] || 0) + 1;
+            const a = horseNumbers[order[0]];
+            const b = horseNumbers[order[1]];
+            umaren[key2(a, b)] = (umaren[key2(a, b)] || 0) + 1;
+            umatan[key2o(a, b)] = (umatan[key2o(a, b)] || 0) + 1;
         }
 
+        // 1-3着
         if (order.length >= 3) {
-            const first3 = [horseNumbers[order[0]], horseNumbers[order[1]], horseNumbers[order[2]]];
-            const k = key3(first3[0], first3[1], first3[2]);
-            sanrenpuku[k] = (sanrenpuku[k] || 0) + 1;
+            const a = horseNumbers[order[0]];
+            const b = horseNumbers[order[1]];
+            const c = horseNumbers[order[2]];
+            sanrenpuku[key3(a, b, c)] = (sanrenpuku[key3(a, b, c)] || 0) + 1;
+            sanrentan[key3o(a, b, c)] = (sanrentan[key3o(a, b, c)] || 0) + 1;
         }
     }
 
     for (const k of Object.keys(wideTopK)) wideTopK[k] /= iterations;
     for (const k of Object.keys(umaren)) umaren[k] /= iterations;
     for (const k of Object.keys(sanrenpuku)) sanrenpuku[k] /= iterations;
+    for (const k of Object.keys(umatan)) umatan[k] /= iterations;
+    for (const k of Object.keys(sanrentan)) sanrentan[k] /= iterations;
 
-    return { wideTopK, umaren, sanrenpuku };
+    return { wideTopK, umaren, sanrenpuku, umatan, sanrentan };
 }

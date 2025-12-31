@@ -278,6 +278,17 @@ export default function RaceDetailView({ race }: { race: Race }) {
                                             <div style={{ fontSize: '0.8rem', color: '#aaa' }}>
                                                 {tip.reason}
                                             </div>
+                                            <div style={{ fontSize: '0.75rem', color: '#888', marginTop: '6px', display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                                                <span>
+                                                    Prob: {tip.prob != null ? `${(tip.prob * 100).toFixed(1)}%` : '取得不可'}
+                                                </span>
+                                                <span>
+                                                    Odds: {tip.odds != null ? tip.odds.toFixed(2) : '取得不可'}
+                                                </span>
+                                                <span style={{ color: (tip.ev ?? -1) > 0 ? '#4caf50' : (tip.ev ?? -1) > -0.1 ? '#fff' : '#ff4444', fontWeight: (tip.ev ?? -1) > 0 ? 'bold' : 'normal' }}>
+                                                    EV: {tip.ev != null ? `${(tip.ev * 100).toFixed(1)}%` : '取得不可'}
+                                                </span>
+                                            </div>
                                         </div>
                                     ))}
                                 </div>
