@@ -288,6 +288,11 @@ export default function RaceDetailView({ race }: { race: Race }) {
                                                 <span style={{ color: (tip.ev ?? -1) > 0 ? '#4caf50' : (tip.ev ?? -1) > -0.1 ? '#fff' : '#ff4444', fontWeight: (tip.ev ?? -1) > 0 ? 'bold' : 'normal' }}>
                                                     EV: {tip.ev != null ? `${(tip.ev * 100).toFixed(1)}%` : '取得不可'}
                                                 </span>
+                                                {tip.stakeYen != null && (
+                                                    <span style={{ color: '#ffcc00', fontWeight: 'bold' }}>
+                                                        Stake: {tip.stakeYen.toLocaleString()}円
+                                                    </span>
+                                                )}
                                             </div>
                                         </div>
                                     ))}

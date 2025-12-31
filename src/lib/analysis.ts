@@ -1,13 +1,21 @@
 // src/lib/analysis.ts
 import { Race, Horse, BettingPortfolio, BettingTip, BetType } from './types';
-import { estimateFinishProbs, estimateBetEventProbs } from './simulator';
+import { estimateFinishProbs, estimateBetEventProbs, FinishProbs, BetEventProbs } from './simulator';
+import { buildOptimizedPortfolios, OptimizeSettings } from './optimizer';
+
+export interface AnalyzeOptions {
+    budgetYen?: number;   // 可変
+    maxBets?: number;     // default 7
+    dreamPct?: number;    // default 0.03
+    minUnitYen?: number;  // default 100
+    enableOptimization?: boolean; // default true
+}
 
 const sortByProb = (horses: Horse[]) => [...horses].sort((a, b) => b.estimatedProb - a.estimatedProb);
 const sortByEv = (horses: Horse[]) => [...horses].sort((a, b) => (b.ev ?? -999) - (a.ev ?? -999));
 const sortByUpset = (horses: Horse[]) => [...horses].sort((a, b) => (b.upsetIndex ?? 0) - (a.upsetIndex ?? 0));
 
 function topKForPlace(n: number): number {
-    // 複勝の支払対象：4頭以下=1、7頭以下=2、それ以上=3（一般的ルール）
     if (n <= 4) return 1;
     if (n <= 7) return 2;
     return 3;
@@ -42,7 +50,6 @@ function hasOddsForTip(race: Race, type: BetType, selection: number[]): boolean 
     return !!(e && (e.value != null || e.min != null));
 }
 
-// オッズ（EV計算用）：複勝はレンジなので min を採用（保守的）
 function getOddsForTip(race: Race, type: BetType, selection: number[]): number | null {
     if (type === '単勝') {
         const h = race.horses.find(x => x.number === selection[0]);
@@ -62,8 +69,8 @@ function calcEv(prob: number | null, odds: number | null): number | null {
     return prob * odds - 1;
 }
 
-// 既存のポートフォリオ生成（券種オッズ取れないものは入れない）
-function generatePortfolios(race: Race): BettingPortfolio[] {
+// フォールバック用：従来ポートフォリオ（ただし三連系は"テーブルから選ぶ"）
+function generatePortfoliosFallback(race: Race): BettingPortfolio[] {
     const horses = race.horses;
     if (horses.length === 0) return [];
 
@@ -86,7 +93,7 @@ function generatePortfolios(race: Race): BettingPortfolio[] {
     if (favorite && secondFav && hasOddsForTip(race, 'ワイド', [favorite.number, secondFav.number])) {
         solidTips.push({ type: 'ワイド', selection: [favorite.number, secondFav.number], confidence: 0.8, reason: '上位2頭の安定決着（ワイドオッズ取得済み）。', alloc: 50 });
     }
-    portfolios.push({ id: 'conservative', name: '🛡️ 堅実 (Conservative)', description: '資金防衛優先', tips: solidTips, riskLevel: 'Low' });
+    portfolios.push({ id: 'conservative', name: '🛡️ 堅実 (Fallback)', description: '資金防衛優先', tips: solidTips, riskLevel: 'Low' });
 
     // 2) バランス
     const balancedTips: BettingTip[] = [];
@@ -104,25 +111,53 @@ function generatePortfolios(race: Race): BettingPortfolio[] {
     } else {
         balancedTips.push({ type: '単勝', selection: [favorite.number], confidence: 0.6, reason: 'EV優位が不明なため本命単勝。', alloc: 100 });
     }
-    portfolios.push({ id: 'balanced', name: '⚖️ バランス (Balanced)', description: '期待値×分散', tips: balancedTips, riskLevel: 'Medium' });
+    portfolios.push({ id: 'balanced', name: '⚖️ バランス (Fallback)', description: '期待値×分散', tips: balancedTips, riskLevel: 'Medium' });
 
-    // 3) 夢枠
+    // 3) 夢枠（ここが重要：特定1組ではなく「テーブル内から選ぶ」）
     const dreamTips: BettingTip[] = [];
-    const topUpset = sortedByUpset.find(h => (h.upsetIndex ?? 0) > 0) ?? sortedByProb[2];
+    const trioTable = race.oddsTables?.['三連複'];
+    const keys = trioTable ? Object.keys(trioTable.odds) : [];
 
-    if (topUpset && favorite && secondFav && hasOddsForTip(race, '三連複', [topUpset.number, favorite.number, secondFav.number])) {
-        dreamTips.push({ type: '三連複', selection: [topUpset.number, favorite.number, secondFav.number], confidence: 0.15, reason: '三連複オッズ取得済み。', alloc: 100 });
-    } else if (topUpset && hasOddsForTip(race, '単勝', [topUpset.number])) {
-        dreamTips.push({ type: '単勝', selection: [topUpset.number], confidence: 0.2, reason: '三連系取得不可のため穴単勝。', alloc: 100 });
+    if (keys.length > 0) {
+        // 本命・対抗を含む三連複を優先
+        const fav = String(favorite.number);
+        const sec = String(secondFav.number);
+        const pick =
+            keys.find(k => k.split('-').includes(fav) && k.split('-').includes(sec)) ||
+            keys[0];
+
+        const sel = pick.split('-').map(n => parseInt(n, 10)).filter(n => Number.isFinite(n));
+        if (sel.length === 3) {
+            dreamTips.push({ type: '三連複', selection: sel, confidence: 0.15, reason: '三連複オッズ取得済み（一覧から選択）。', alloc: 100 });
+        }
+    } else {
+        const topUpset = sortedByUpset.find(h => (h.upsetIndex ?? 0) > 0) ?? sortedByProb[2];
+        const note = trioTable?.note ? `（${trioTable.note}）` : '';
+        if (topUpset && hasOddsForTip(race, '単勝', [topUpset.number])) {
+            dreamTips.push({ type: '単勝', selection: [topUpset.number], confidence: 0.2, reason: `三連複が取得不可のため穴単勝${note}`, alloc: 100 });
+        }
     }
-    portfolios.push({ id: 'dream', name: '🦄 夢枠 (Dream)', description: '一撃狙い（取得できた券種のみ）', tips: dreamTips, riskLevel: 'High' });
+    portfolios.push({ id: 'dream', name: '🦄 夢枠 (Fallback)', description: '一撃狙い（取得できた券種のみ）', tips: dreamTips, riskLevel: 'High' });
 
     return portfolios;
 }
 
-export function analyzeRace(race: Race): Race {
+export function analyzeRace(race: Race, opts: AnalyzeOptions = {}): Race {
     const horses = race.horses;
     const notes: string[] = [];
+
+    // オッズテーブルの状態を notes に出す（「取得成功だが空」切り分け）
+    const checkTypes: BetType[] = ['複勝', 'ワイド', '馬連', '三連複', '三連単', '馬単'];
+    for (const t of checkTypes) {
+        const tbl = race.oddsTables?.[t];
+        if (!tbl) continue;
+        const count = Object.keys(tbl.odds ?? {}).length;
+        if (count === 0) {
+            notes.push(`${t}: 取得はできたがパース結果が空の可能性（note=${tbl.note ?? 'なし'}）`);
+        } else {
+            notes.push(`${t}: ${count}件のオッズを取得`);
+        }
+    }
 
     // marketProb（全頭単勝オッズ揃った時のみ）
     const allOddsAvailable = horses.every(h => h.odds != null && h.odds > 0);
@@ -193,22 +228,52 @@ export function analyzeRace(race: Race): Race {
         });
     }
 
-    // ★ 券種イベント確率（ワイド/馬連/三連複/馬単/三連単）
+    // 券種イベント確率
     const kPlace = topKForPlace(horses.length);
     const horseNumbers = horses.map(h => h.number);
     const betEvents = estimateBetEventProbs(modelWin, iterations, kPlace, horseNumbers, Math.random);
 
-    // まずポートフォリオ生成
-    race.portfolios = generatePortfolios(race);
+    // --- ここから最適化 ---
+    const enableOptimization = opts.enableOptimization ?? true;
+    const budgetYen = Number.isFinite(opts.budgetYen ?? NaN) && (opts.budgetYen as number) > 0 ? (opts.budgetYen as number) : 20000;
+    const maxBets = Number.isFinite(opts.maxBets ?? NaN) && (opts.maxBets as number) > 0 ? (opts.maxBets as number) : 7;
+    const dreamPct = Number.isFinite(opts.dreamPct ?? NaN) && (opts.dreamPct as number) >= 0 ? (opts.dreamPct as number) : 0.03;
+    const minUnitYen = Number.isFinite(opts.minUnitYen ?? NaN) && (opts.minUnitYen as number) > 0 ? (opts.minUnitYen as number) : 100;
 
-    // 複勝圏確率テーブル
+    if (opts.budgetYen == null) {
+        notes.push('budgetYen未指定のため、参考として20,000円で配分（?budgetYen=... で変更可）');
+    }
+
+    if (enableOptimization) {
+        const settings: OptimizeSettings = { budgetYen, maxBets, dreamPct, minUnitYen };
+
+        const opt = buildOptimizedPortfolios({
+            race,
+            modelWin,
+            modelProbs,
+            betEvents,
+            kPlace,
+            settings,
+        });
+
+        if (opt.portfolios.length > 0) {
+            race.portfolios = opt.portfolios;
+            notes.push(...opt.notes);
+        } else {
+            notes.push(...opt.notes);
+            race.portfolios = generatePortfoliosFallback(race);
+        }
+    } else {
+        race.portfolios = generatePortfoliosFallback(race);
+    }
+
+    // Tipに prob/odds/ev を付与（既存UI互換）
     const placeProbByNum: Record<number, number> = {};
     horses.forEach((h, i) => {
         const pPlace = (kPlace === 1) ? modelProbs.win[i] : (kPlace === 2) ? modelProbs.top2[i] : modelProbs.top3[i];
         placeProbByNum[h.number] = pPlace;
     });
 
-    // 券種別確率取得
     const probForTip = (type: BetType, sel: number[]): number | null => {
         if (type === '単勝') {
             const h = horses.find(x => x.number === sel[0]);
@@ -222,26 +287,28 @@ export function analyzeRace(race: Race): Race {
         if (type === '三連複') return betEvents.sanrenpuku[key] ?? null;
         if (type === '馬単') return betEvents.umatan[key] ?? null;
         if (type === '三連単') return betEvents.sanrentan[key] ?? null;
-
         return null;
     };
 
-    // ポートフォリオ内の各Tipに prob/odds/ev を付与
     if (race.portfolios) {
         race.portfolios.forEach(pf => {
             pf.tips.forEach(tip => {
-                const p = probForTip(tip.type, tip.selection);
-                const o = getOddsForTip(race, tip.type, tip.selection);
-                tip.prob = p;
-                tip.odds = o;
-                tip.ev = calcEv(p, o);
+                // 最適化済みの場合は既に値があるのでスキップ
+                if (tip.prob == null) {
+                    tip.prob = probForTip(tip.type, tip.selection);
+                }
+                if (tip.odds == null) {
+                    tip.odds = getOddsForTip(race, tip.type, tip.selection);
+                }
+                if (tip.ev == null) {
+                    tip.ev = calcEv(tip.prob, tip.odds);
+                }
 
-                if (tip.type === '複勝' && o != null) {
-                    tip.reason += `（EV計算は複勝オッズ下限=${o}を使用）`;
+                if (tip.type === '複勝' && tip.odds != null) {
+                    tip.reason += `（EV計算は複勝オッズ下限=${tip.odds}を使用）`;
                 }
             });
 
-            // EVが取れない買い目がある場合は注意
             const missing = pf.tips.filter(t => t.ev == null);
             if (missing.length > 0) {
                 notes.push(`${pf.name}: 一部買い目でEV算出不可（オッズor確率が取得不可）`);

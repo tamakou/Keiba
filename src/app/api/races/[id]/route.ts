@@ -1,3 +1,4 @@
+// src/app/api/races/[id]/route.ts
 import { NextResponse } from 'next/server';
 import { getRaceDetails } from '@/lib/netkeiba';
 import { analyzeRace } from '@/lib/analysis';
@@ -5,8 +6,14 @@ import { analyzeRace } from '@/lib/analysis';
 export const runtime = 'nodejs';
 
 export async function GET(request: Request, { params }: { params: Promise<{ id: string }> }) {
-    // Await params if Next.js 15+ 
     const { id } = await params;
+    const { searchParams } = new URL(request.url);
+
+    // 可変予算パラメータ
+    const budgetYen = Number(searchParams.get('budgetYen'));
+    const maxBets = Number(searchParams.get('maxBets'));
+    const dreamPct = Number(searchParams.get('dreamPct'));
+    const minUnitYen = Number(searchParams.get('minUnitYen'));
 
     try {
         const race = await getRaceDetails(id);
@@ -15,9 +22,14 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
             return NextResponse.json({ error: 'Race not found' }, { status: 404 });
         }
 
-        // --- Calculation Logic (Shared) ---
-        // Apply probability and EV analysis
-        analyzeRace(race);
+        // 分析実行（予算オプション付き）
+        analyzeRace(race, {
+            budgetYen: Number.isFinite(budgetYen) ? budgetYen : undefined,
+            maxBets: Number.isFinite(maxBets) ? maxBets : undefined,
+            dreamPct: Number.isFinite(dreamPct) ? dreamPct : undefined,
+            minUnitYen: Number.isFinite(minUnitYen) ? minUnitYen : undefined,
+            enableOptimization: true,
+        });
 
         return NextResponse.json({ race });
     } catch (error) {
