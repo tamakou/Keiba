@@ -21,7 +21,8 @@ function absUrl(href: string): string {
 
 function parseOddsEntry(rawText: string): OddsEntry {
     const raw = rawText.trim();
-    const compact = raw.replace(/\s/g, '');
+    // カンマを除去してから処理（1,234.5 → 1234.5）
+    const compact = raw.replace(/\s/g, '').replace(/,/g, '');
 
     // 数値抽出（複勝レンジ対応）
     const nums = compact.match(/\d+(\.\d+)?/g);
@@ -213,59 +214,126 @@ function parseTrifectaListOdds(html: string): Record<string, OddsEntry> {
     return odds;
 }
 
-/** NAR "人気順" 表示 (Odds_List_Table) をパース。ワイド・馬連・馬単・三連系共通 */
+/** NAR "人気順" 表示をパース。RaceOdds_HorseList_Table構造対応 */
 function parseOddsListTable(html: string, type: BetType): Record<string, OddsEntry> {
     const $ = cheerio.load(html);
     const odds: Record<string, OddsEntry> = {};
 
-    // Odds_List_Table または tr を探索
-    const rows = $('table.Odds_List_Table tr').length
-        ? $('table.Odds_List_Table tr')
-        : $('tr');
+    // NAR の実際のテーブル構造: RaceOdds_HorseList_Table
+    const table = $('table.RaceOdds_HorseList_Table').first();
+    const rows = table.length ? table.find('tr') : $('tr');
+
+    // キー生成
+    const buildKey = (nums: number[]): string | null => {
+        if (type === '馬単') {
+            if (nums.length !== 2) return null;
+            return `${nums[0]}>${nums[1]}`;
+        }
+        if (type === '三連単') {
+            if (nums.length !== 3) return null;
+            return `${nums[0]}>${nums[1]}>${nums[2]}`;
+        }
+        if (type === '三連複') {
+            if (nums.length !== 3) return null;
+            const s = [...nums].sort((a, b) => a - b);
+            return `${s[0]}-${s[1]}-${s[2]}`;
+        }
+        // ワイド/馬連
+        if (nums.length !== 2) return null;
+        const a = Math.min(nums[0], nums[1]);
+        const b = Math.max(nums[0], nums[1]);
+        return `${a}-${b}`;
+    };
 
     rows.each((_, tr) => {
-        const text = $(tr).text().replace(/\s+/g, ' ');
+        const $tr = $(tr);
 
-        // 馬番抽出：「1 - 2」や「3 - 5 - 8」形式
-        const numMatches = text.match(/(\d{1,2})\s*[-－–]\s*(\d{1,2})(?:\s*[-－–]\s*(\d{1,2}))?/);
-        if (!numMatches) return;
+        // 方法1: td.Combi + td.Txt_R (NAR標準構造)
+        const combiCell = $tr.find('td.Combi');
+        const oddsCell = $tr.find('td.Txt_R');
 
-        const a = parseInt(numMatches[1], 10);
-        const b = parseInt(numMatches[2], 10);
-        const c = numMatches[3] ? parseInt(numMatches[3], 10) : null;
+        if (combiCell.length && oddsCell.length) {
+            // span.UmaBan から馬番を取得
+            const umabans = combiCell.find('span.UmaBan');
+            const nums: number[] = [];
+            umabans.each((_, span) => {
+                const n = parseInt($(span).text().trim(), 10);
+                if (Number.isFinite(n) && n >= 1) nums.push(n);
+            });
 
-        // オッズ抽出
-        const oddsMatches = text.match(/(\d+\.\d+)\s*(?:[-－–～~]\s*(\d+\.\d+))?/);
-        if (!oddsMatches) return;
+            // span.UmabanがなければテキストからDigitを抽出
+            if (nums.length === 0) {
+                const combiText = combiCell.text().replace(/\s+/g, ' ').trim();
+                const digitMatches = combiText.match(/\d+/g);
+                if (digitMatches) {
+                    for (const d of digitMatches) {
+                        const n = parseInt(d, 10);
+                        if (Number.isFinite(n) && n >= 1 && n <= 20) nums.push(n);
+                    }
+                }
+            }
 
-        const v1 = parseFloat(oddsMatches[1]);
-        const v2 = oddsMatches[2] ? parseFloat(oddsMatches[2]) : null;
-        const raw = oddsMatches[0];
+            const key = buildKey(nums);
+            if (!key) return;
 
-        let key: string;
-        if (type === '三連単') {
-            key = c != null ? `${a}>${b}>${c}` : `${a}>${b}`;
-        } else if (type === '馬単') {
-            key = `${a}>${b}`;
-        } else if (c != null) {
-            // 三連複
-            const sorted = [a, b, c].sort((x, y) => x - y);
-            key = `${sorted[0]}-${sorted[1]}-${sorted[2]}`;
-        } else {
-            // ワイド、馬連
-            key = a < b ? `${a}-${b}` : `${b}-${a}`;
+            const oddsText = oddsCell.text().trim();
+            const entry = parseOddsEntry(oddsText);
+            if (entry.value !== null || entry.min !== null) {
+                odds[key] = entry;
+            }
+            return;
         }
 
-        if (v2 != null) {
-            // レンジ形式
-            odds[key] = { raw, value: null, min: Math.min(v1, v2), max: Math.max(v1, v2) };
-        } else {
-            odds[key] = { raw, value: v1, min: null, max: null };
+        // 方法2: フォールバック - 行全体からパース
+        const tds = $tr.find('td');
+        if (!tds.length) return;
+
+        const tdTexts = tds.map((_, td) => $(td).text().trim()).get();
+
+        // 数字セルを探す（最初の3つまたは2つの数字）
+        const nums: number[] = [];
+        for (const text of tdTexts) {
+            // 単一数字のセル（馬番）
+            const singleMatch = text.match(/^(\d{1,2})$/);
+            if (singleMatch) {
+                const n = parseInt(singleMatch[1], 10);
+                if (Number.isFinite(n) && n >= 1 && n <= 20 && nums.length < 3) {
+                    nums.push(n);
+                }
+            }
+        }
+
+        // 数字が足りなければ、Digitを含むセルから抽出
+        if (nums.length < 2) {
+            const rowText = $tr.text();
+            const allNums = rowText.match(/\d+/g);
+            if (allNums) {
+                for (const d of allNums) {
+                    const n = parseInt(d, 10);
+                    if (Number.isFinite(n) && n >= 1 && n <= 20 && !nums.includes(n)) {
+                        nums.push(n);
+                        if (nums.length >= (type === '三連複' || type === '三連単' ? 3 : 2)) break;
+                    }
+                }
+            }
+        }
+
+        const key = buildKey(nums);
+        if (!key) return;
+
+        // オッズは小数点を含むセルを探す
+        const oddsText = tdTexts.find(t => /\d+\.\d+/.test(t));
+        if (!oddsText) return;
+
+        const entry = parseOddsEntry(oddsText);
+        if (entry.value !== null || entry.min !== null) {
+            odds[key] = entry;
         }
     });
 
     return odds;
 }
+
 
 function parseOddsPage(type: BetType, html: string): Record<string, OddsEntry> {
     if (type === '単勝' || type === '複勝') return parseSingleOdds(html);
@@ -301,7 +369,7 @@ export async function fetchRaceOddsTables(raceId: string): Promise<{ tables: Odd
 
     const foundUrls = findOddsUrlsFromIndex(indexHtml);
 
-    const targets: BetType[] = ['単勝', '複勝', 'ワイド', '馬連', '三連複', '三連単'];
+    const targets: BetType[] = ['単勝', '複勝', 'ワイド', '馬連', '馬単', '三連複', '三連単'];
 
     for (const t of targets) {
         let url = foundUrls[t] || (FALLBACK_TYPE_CODE[t] ? `${indexUrl}&type=${FALLBACK_TYPE_CODE[t]}` : null);
