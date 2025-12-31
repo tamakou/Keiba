@@ -7,10 +7,10 @@ const BASE = 'https://nar.netkeiba.com';
 
 const FALLBACK_TYPE_CODE: Partial<Record<BetType, string>> = {
     '単勝': 'b1',
-    '複勝': 'b2',
+    '複勝': 'b1', // 単勝複勝は同ページ
     '馬連': 'b4',
-    '馬単': 'b5',
-    'ワイド': 'b6',
+    'ワイド': 'b5',
+    '馬単': 'b6',
     '三連複': 'b7',
     '三連単': 'b8',
 };
@@ -115,7 +115,8 @@ function parsePairListOdds(html: string): Record<string, OddsEntry> {
 function parsePairMatrixOdds(html: string): Record<string, OddsEntry> {
     const $ = cheerio.load(html);
 
-    let best: cheerio.Cheerio<cheerio.Element> | null = null;
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    let best: any = null;
     let bestCols: number[] = [];
 
     $('table').each((_, tbl) => {
@@ -131,7 +132,8 @@ function parsePairMatrixOdds(html: string): Record<string, OddsEntry> {
     if (!best) return parsePairListOdds(html);
 
     const odds: Record<string, OddsEntry> = {};
-    (best as cheerio.Cheerio<cheerio.Element>).find('tr').slice(1).each((_, tr) => {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    best.find('tr').slice(1).each((_: number, tr: any) => {
         const $tr = $(tr);
 
         const rowHeadText = $tr.find('th,td').first().text().trim();
@@ -211,12 +213,73 @@ function parseTrifectaListOdds(html: string): Record<string, OddsEntry> {
     return odds;
 }
 
+/** NAR "人気順" 表示 (Odds_List_Table) をパース。ワイド・馬連・馬単・三連系共通 */
+function parseOddsListTable(html: string, type: BetType): Record<string, OddsEntry> {
+    const $ = cheerio.load(html);
+    const odds: Record<string, OddsEntry> = {};
+
+    // Odds_List_Table または tr を探索
+    const rows = $('table.Odds_List_Table tr').length
+        ? $('table.Odds_List_Table tr')
+        : $('tr');
+
+    rows.each((_, tr) => {
+        const text = $(tr).text().replace(/\s+/g, ' ');
+
+        // 馬番抽出：「1 - 2」や「3 - 5 - 8」形式
+        const numMatches = text.match(/(\d{1,2})\s*[-－–]\s*(\d{1,2})(?:\s*[-－–]\s*(\d{1,2}))?/);
+        if (!numMatches) return;
+
+        const a = parseInt(numMatches[1], 10);
+        const b = parseInt(numMatches[2], 10);
+        const c = numMatches[3] ? parseInt(numMatches[3], 10) : null;
+
+        // オッズ抽出
+        const oddsMatches = text.match(/(\d+\.\d+)\s*(?:[-－–～~]\s*(\d+\.\d+))?/);
+        if (!oddsMatches) return;
+
+        const v1 = parseFloat(oddsMatches[1]);
+        const v2 = oddsMatches[2] ? parseFloat(oddsMatches[2]) : null;
+        const raw = oddsMatches[0];
+
+        let key: string;
+        if (type === '三連単') {
+            key = c != null ? `${a}>${b}>${c}` : `${a}>${b}`;
+        } else if (type === '馬単') {
+            key = `${a}>${b}`;
+        } else if (c != null) {
+            // 三連複
+            const sorted = [a, b, c].sort((x, y) => x - y);
+            key = `${sorted[0]}-${sorted[1]}-${sorted[2]}`;
+        } else {
+            // ワイド、馬連
+            key = a < b ? `${a}-${b}` : `${b}-${a}`;
+        }
+
+        if (v2 != null) {
+            // レンジ形式
+            odds[key] = { raw, value: null, min: Math.min(v1, v2), max: Math.max(v1, v2) };
+        } else {
+            odds[key] = { raw, value: v1, min: null, max: null };
+        }
+    });
+
+    return odds;
+}
+
 function parseOddsPage(type: BetType, html: string): Record<string, OddsEntry> {
     if (type === '単勝' || type === '複勝') return parseSingleOdds(html);
-    if (type === 'ワイド' || type === '馬連') return parsePairMatrixOdds(html);
-    if (type === '三連複') return parseTrioListOdds(html);
-    if (type === '三連単') return parseTrifectaListOdds(html);
-    if (type === '馬単') return parseTrifectaListOdds(html);
+    // 組み合わせ券種は人気順リスト形式をパース
+    if (['ワイド', '馬連', '馬単', '三連複', '三連単'].includes(type)) {
+        const result = parseOddsListTable(html, type);
+        // フォールバック: リストテーブルでパースできなかった場合は旧パーサー
+        if (Object.keys(result).length === 0) {
+            if (type === 'ワイド' || type === '馬連') return parsePairMatrixOdds(html);
+            if (type === '三連複') return parseTrioListOdds(html);
+            if (type === '三連単' || type === '馬単') return parseTrifectaListOdds(html);
+        }
+        return result;
+    }
     return {};
 }
 
@@ -241,8 +304,12 @@ export async function fetchRaceOddsTables(raceId: string): Promise<{ tables: Odd
     const targets: BetType[] = ['単勝', '複勝', 'ワイド', '馬連', '三連複', '三連単'];
 
     for (const t of targets) {
-        const url = foundUrls[t] || (FALLBACK_TYPE_CODE[t] ? `${indexUrl}&type=${FALLBACK_TYPE_CODE[t]}` : null);
+        let url = foundUrls[t] || (FALLBACK_TYPE_CODE[t] ? `${indexUrl}&type=${FALLBACK_TYPE_CODE[t]}` : null);
         if (!url) continue;
+        // 組み合わせ券種は人気順表示（housiki=c99）を取得するとパースしやすい
+        if (['ワイド', '馬連', '馬単', '三連複', '三連単'].includes(t) && !url.includes('housiki=')) {
+            url += '&housiki=c99';
+        }
 
         try {
             const res = await fetchHtmlAuto(url);

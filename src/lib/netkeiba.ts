@@ -11,6 +11,17 @@ function absUrl(href: string): string {
     try { return new URL(href, BASE).toString(); } catch { return href; }
 }
 
+/** 馬URLをdb.netkeiba.comに正規化（nar.のままだと404） */
+function normalizeHorseUrl(href: string): string | null {
+    if (!href) return null;
+    // すでに db.netkeiba.com なら OK
+    if (href.includes('db.netkeiba.com')) return href;
+    // /horse/123456 形式を db.netkeiba.com に変換
+    const m = href.match(/\/horse\/([0-9a-zA-Z]+)/);
+    if (m) return `https://db.netkeiba.com/horse/${m[1]}/`;
+    return href;
+}
+
 export async function getRaceList(date: string): Promise<Race[]> {
     const dateListUrl = `${BASE}/top/race_list_get_date_list.html?kaisai_date=${date}&encoding=UTF-8`;
     let dateRes;
@@ -151,7 +162,7 @@ export async function getRaceDetails(raceId: string): Promise<Race | null> {
 
         const name = horseLink.text().trim() || '取得不可';
         const href = horseLink.attr('href') || '';
-        const horseUrl = href ? absUrl(href) : null;
+        const horseUrl = normalizeHorseUrl(href);
 
         let gate = 0;
         const wakuText = $row.find('td[class^="Waku"]').text().trim();
@@ -212,7 +223,7 @@ export async function getRaceDetails(raceId: string): Promise<Race | null> {
     }
 
     // --- 直近5走 ---
-    await enrichHorsesLast5(horses, sources);
+    await enrichHorsesLast5(horses, sources, raceId);
 
     // raceIdから日付推定
     let date = '';
