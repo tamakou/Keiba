@@ -5,8 +5,13 @@ import { Race } from '@/lib/types';
 
 // Helper to fetch data on server
 async function getRacesServer(date: string) {
-  const { getRaceList } = await import('@/lib/netkeiba');
-  return await getRaceList(date);
+  try {
+    const { getRaceList } = await import('@/lib/netkeiba');
+    return await getRaceList(date);
+  } catch (e) {
+    console.error('Failed to fetch race list:', e);
+    return [];
+  }
 }
 
 function formatDate(d: Date): string {

@@ -81,11 +81,21 @@ function writeJson(p: string, obj: unknown): void {
     fs.writeFileSync(p, JSON.stringify(obj, null, 2) + '\n', 'utf-8');
 }
 
+let cacheOnlyMode = false;
+
 async function loadOne(spec: RaceSpec): Promise<{ race: Race; result: RaceResult } | null> {
     const pr = cachePath('race', spec.system, spec.raceId);
     const ps = cachePath('result', spec.system, spec.raceId);
     let race = readJsonIfExists<Race>(pr);
     let result = readJsonIfExists<RaceResult>(ps);
+
+    // Cache-only mode: skip if not cached
+    if (cacheOnlyMode) {
+        if (!race || !result) return null;
+        if (!result.order?.length) return null;
+        return { race, result };
+    }
+
     if (!race) {
         const r = await getRaceDetails(spec.raceId, spec.system);
         if (!r) return null;
@@ -202,6 +212,7 @@ async function main() {
     const mc = Number(arg('--mc', '4000')) || 4000;
     const bins = Number(arg('--bins', '10')) || 10;
     const useMix = (arg('--mix', '1') !== '0');
+    cacheOnlyMode = process.argv.includes('--cache-only');
 
     const raw = JSON.parse(fs.readFileSync(dataFile, 'utf-8')) as RaceSpec[];
     const specs = Array.isArray(raw) ? raw : [];
@@ -210,7 +221,7 @@ async function main() {
         process.exit(0);
     }
 
-    console.log(`Loading ${specs.length} races from ${dataFile}...`);
+    console.log(`Loading ${specs.length} races from ${dataFile}... (cache-only=${cacheOnlyMode})`);
 
     const baseW = getModelWeights();
     const formOnly: Partial<ModelWeights> = {
@@ -235,60 +246,71 @@ async function main() {
     const aggs: Record<string, Agg> = {};
     for (const m of models) aggs[m.id] = initAgg();
     const skipped: Record<string, number> = {};
+    let errorCount = 0;
 
     for (const s of specs) {
-        const loaded = await loadOne(s);
-        if (!loaded) continue;
-        const { race, result } = loaded;
-        const labels = buildTopKLabels(result);
-        const winner = result.order[0];
-        const nums = race.horses.map(h => h.number);
-        const idxWinner = nums.findIndex(n => n === winner);
-        if (idxWinner < 0) continue;
-
-        const rng = makeRng(seed ^ (parseInt(s.raceId.slice(-6), 10) || 0));
-
-        for (const m of models) {
-            const agg = aggs[m.id];
-
-            let pred: Pred;
-            if (m.kind === 'uniform') pred = uniformPred(nums.length, mc, rng);
-            else if (m.kind === 'market') pred = marketPred(race, mc, rng);
-            else pred = modelPred(race, mc, rng, useMix, m.weights);
-
-            if (!pred.ok) {
-                skipped[m.id] = (skipped[m.id] ?? 0) + 1;
+        try {
+            const loaded = await loadOne(s);
+            if (!loaded) {
+                skipped['load'] = (skipped['load'] ?? 0) + 1;
                 continue;
             }
+            const { race, result } = loaded;
+            const labels = buildTopKLabels(result);
+            const winner = result.order[0];
+            const nums = race.horses.map(h => h.number);
+            const idxWinner = nums.findIndex(n => n === winner);
+            if (idxWinner < 0) continue;
 
-            // logloss winner
-            const pWin = clamp(pred.win[idxWinner], 1e-12, 1);
-            agg.logloss += -Math.log(pWin);
-            agg.races += 1;
+            const rng = makeRng(seed ^ (parseInt(s.raceId.slice(-6), 10) || 0));
 
-            // top1 & winner in top3 (by win prob)
-            const best = nums[pred.win.indexOf(Math.max(...pred.win))];
-            if (best === winner) agg.top1 += 1;
-            const predTop3 = nums.map((n, i) => ({ n, p: pred.win[i] })).sort((a, b) => b.p - a.p).slice(0, 3).map(x => x.n);
-            if (predTop3.includes(winner)) agg.winInTop3 += 1;
 
-            // per-horse labels
-            for (let i = 0; i < nums.length; i++) {
-                const n = nums[i];
-                agg.horses += 1;
-                agg.pWin.push(clamp(pred.win[i], 0, 1));
-                agg.yWin.push(n === winner ? 1 : 0);
-                agg.p2.push(clamp(pred.top2[i], 0, 1));
-                agg.y2.push(labels.top2.has(n) ? 1 : 0);
-                agg.p3.push(clamp(pred.top3[i], 0, 1));
-                agg.y3.push(labels.top3.has(n) ? 1 : 0);
+            for (const m of models) {
+                const agg = aggs[m.id];
+
+                let pred: Pred;
+                if (m.kind === 'uniform') pred = uniformPred(nums.length, mc, rng);
+                else if (m.kind === 'market') pred = marketPred(race, mc, rng);
+                else pred = modelPred(race, mc, rng, useMix, m.weights);
+
+                if (!pred.ok) {
+                    skipped[m.id] = (skipped[m.id] ?? 0) + 1;
+                    continue;
+                }
+
+                // logloss winner
+                const pWin = clamp(pred.win[idxWinner], 1e-12, 1);
+                agg.logloss += -Math.log(pWin);
+                agg.races += 1;
+
+                // top1 & winner in top3 (by win prob)
+                const best = nums[pred.win.indexOf(Math.max(...pred.win))];
+                if (best === winner) agg.top1 += 1;
+                const predTop3 = nums.map((n, i) => ({ n, p: pred.win[i] })).sort((a, b) => b.p - a.p).slice(0, 3).map(x => x.n);
+                if (predTop3.includes(winner)) agg.winInTop3 += 1;
+
+                // per-horse labels
+                for (let i = 0; i < nums.length; i++) {
+                    const n = nums[i];
+                    agg.horses += 1;
+                    agg.pWin.push(clamp(pred.win[i], 0, 1));
+                    agg.yWin.push(n === winner ? 1 : 0);
+                    agg.p2.push(clamp(pred.top2[i], 0, 1));
+                    agg.y2.push(labels.top2.has(n) ? 1 : 0);
+                    agg.p3.push(clamp(pred.top3[i], 0, 1));
+                    agg.y3.push(labels.top3.has(n) ? 1 : 0);
+                }
             }
+        } catch (e) {
+            errorCount++;
+            console.log(`[ERROR] ${s.system} ${s.raceId}: ${e}`);
         }
     }
 
     const report: Record<string, unknown> = {
-        config: { dataFile, seed, mc, bins, useMix },
+        config: { dataFile, seed, mc, bins, useMix, cacheOnly: cacheOnlyMode },
         skipped,
+        errorCount,
         results: {} as Record<string, unknown>,
     };
     for (const m of models) (report.results as Record<string, unknown>)[m.id] = finalize(aggs[m.id], bins);
@@ -308,3 +330,4 @@ main().catch(e => {
     console.error(e);
     process.exit(1);
 });
+

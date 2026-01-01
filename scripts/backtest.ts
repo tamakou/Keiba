@@ -31,11 +31,34 @@ function writeJson(p: string, obj: unknown): void {
     fs.writeFileSync(p, JSON.stringify(obj, null, 2) + '\n', 'utf-8');
 }
 
+async function delay(ms: number): Promise<void> {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function fetchWithRetry<T>(fn: () => Promise<T | null>, retries = 2, delayMs = 500): Promise<T | null> {
+    for (let i = 0; i <= retries; i++) {
+        try {
+            const r = await fn();
+            if (r) return r;
+        } catch (e) {
+            if (i < retries) {
+                await delay(delayMs * (i + 1));
+            } else {
+                throw e;
+            }
+        }
+    }
+    return null;
+}
+
+let cacheOnlyMode = false;
+
 async function getCachedRace(raceId: string, system: System): Promise<Race | null> {
     const p = cachePath('race', system, raceId);
     const cached = readJsonIfExists<Race>(p);
     if (cached) return cached;
-    const r = await getRaceDetails(raceId, system);
+    if (cacheOnlyMode) return null;
+    const r = await fetchWithRetry(() => getRaceDetails(raceId, system));
     if (r) writeJson(p, r);
     return r;
 }
@@ -44,7 +67,8 @@ async function getCachedResult(raceId: string, system: System): Promise<RaceResu
     const p = cachePath('result', system, raceId);
     const cached = readJsonIfExists<RaceResult>(p);
     if (cached) return cached;
-    const r = await fetchRaceResult(raceId, system);
+    if (cacheOnlyMode) return null;
+    const r = await fetchWithRetry(() => fetchRaceResult(raceId, system));
     if (r) writeJson(p, r);
     return r;
 }
@@ -146,6 +170,7 @@ async function main() {
     const seed = Number(arg('--seed', process.env.KEIBA_BACKTEST_SEED || '12345'));
     const mcIters = Number(arg('--mc', process.env.KEIBA_BACKTEST_MC_ITERATIONS || '8000'));
     const bins = Number(arg('--bins', process.env.KEIBA_ECE_BINS || '10'));
+    cacheOnlyMode = process.argv.includes('--cache-only');
 
     const specs = JSON.parse(fs.readFileSync(file, 'utf-8')) as RaceSpec[];
     if (!Array.isArray(specs) || specs.length === 0) {
