@@ -31,7 +31,7 @@ export default async function RacePage({
     }
 
     // 分析実行（予算オプション付き）
-    race = analyzeRace(race, {
+    race = await analyzeRace(race, {
         budgetYen: Number.isFinite(budgetYen) ? budgetYen : undefined,
         maxBets: Number.isFinite(maxBets) ? maxBets : undefined,
         dreamPct: Number.isFinite(dreamPct) ? dreamPct : undefined,

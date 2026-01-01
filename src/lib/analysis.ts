@@ -2,7 +2,9 @@
 import { Race, Horse, BettingPortfolio, BettingTip, BetType } from './types';
 import { estimateFinishProbs, estimateBetEventProbs, FinishProbs, BetEventProbs } from './simulator';
 import { buildOptimizedPortfolios, OptimizeSettings } from './optimizer';
-import { computeModelV2 } from './modelV2';
+import { computeModelV2, ModelV2Options } from './modelV2';
+import { fetchJockeyStats, fetchTrainerStats, PersonStats } from './externalStats';
+import { runWithConcurrency } from './cache';
 
 export interface AnalyzeOptions {
     budgetYen?: number;   // 可変
@@ -143,7 +145,7 @@ function generatePortfoliosFallback(race: Race): BettingPortfolio[] {
     return portfolios;
 }
 
-export function analyzeRace(race: Race, opts: AnalyzeOptions = {}): Race {
+export async function analyzeRace(race: Race, opts: AnalyzeOptions = {}): Promise<Race> {
     const horses = race.horses;
     const notes: string[] = [];
 
@@ -171,7 +173,55 @@ export function analyzeRace(race: Race, opts: AnalyzeOptions = {}): Race {
     }
 
     // --- 推定確率（Model v2: last5/馬場/距離/脚質ベース） ---
-    const v2 = computeModelV2(race);
+
+    // 外部統計（任意）：KEIBA_ENABLE_EXTERNAL_STATS=1 で有効
+    const enableExternal = process.env.KEIBA_ENABLE_EXTERNAL_STATS === '1';
+    const ttlMs = Number(process.env.KEIBA_EXTERNAL_STATS_TTL_MS || '') || (7 * 24 * 3600 * 1000);
+    const conc = Number(process.env.KEIBA_EXTERNAL_STATS_CONCURRENCY || '') || 4;
+
+    const jockeyStatsByUrl = new Map<string, PersonStats>();
+    const trainerStatsByUrl = new Map<string, PersonStats>();
+    const sourceSet = new Set<string>();
+
+    if (enableExternal) {
+        const jUrls = Array.from(new Set(horses.map(h => h.jockeyUrl).filter((u): u is string => !!u)));
+        const tUrls = Array.from(new Set(horses.map(h => h.trainerUrl).filter((u): u is string => !!u)));
+
+        notes.push(`外部統計: jockey=${jUrls.length} trainer=${tUrls.length} (ttl=${ttlMs}ms, conc=${conc})`);
+
+        await runWithConcurrency(jUrls, conc, async (u) => {
+            try {
+                const st = await fetchJockeyStats(u, ttlMs);
+                if (st) {
+                    jockeyStatsByUrl.set(u, st);
+                    if (!sourceSet.has(st.sourceUrl)) {
+                        sourceSet.add(st.sourceUrl);
+                        race.sources.push({ url: st.sourceUrl, fetchedAtJst: st.fetchedAtJst, items: ['external:jockey'], note: st.note });
+                    }
+                }
+            } catch { /* ignore */ }
+            return null;
+        });
+
+        await runWithConcurrency(tUrls, conc, async (u) => {
+            try {
+                const st = await fetchTrainerStats(u, ttlMs);
+                if (st) {
+                    trainerStatsByUrl.set(u, st);
+                    if (!sourceSet.has(st.sourceUrl)) {
+                        sourceSet.add(st.sourceUrl);
+                        race.sources.push({ url: st.sourceUrl, fetchedAtJst: st.fetchedAtJst, items: ['external:trainer'], note: st.note });
+                    }
+                }
+            } catch { /* ignore */ }
+            return null;
+        });
+
+        notes.push(`外部統計: fetched jockey=${jockeyStatsByUrl.size} trainer=${trainerStatsByUrl.size}`);
+    }
+
+    const v2Opts: ModelV2Options = enableExternal ? { jockeyStatsByUrl, trainerStatsByUrl } : {};
+    const v2 = computeModelV2(race, v2Opts);
     notes.push(...v2.notes);
 
     horses.forEach((h, i) => {

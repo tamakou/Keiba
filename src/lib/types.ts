@@ -49,6 +49,10 @@ export interface Horse {
     jockey: string;
     trainer: string;
 
+    // 外部統計取得用（db.netkeibaへ正規化して使う）
+    jockeyUrl?: string | null;
+    trainerUrl?: string | null;
+
     weight: string;              // 取れなければ "取得不可"
     weightChange: number | null; // 欠損は null
 

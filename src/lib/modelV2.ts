@@ -5,6 +5,13 @@
 import { Race, Horse, HorseRun } from './types';
 import { normalizeBaba, parseRaceCourse, parseSurfaceDistance, Surface, Baba } from './courseParse';
 import { findCourseProfile, estimatePaceIndex, CourseProfile } from './courseProfiles';
+import { PersonStats } from './externalStats';
+
+export interface ModelV2Options {
+    jockeyStatsByUrl?: Map<string, PersonStats>;
+    trainerStatsByUrl?: Map<string, PersonStats>;
+    paceOverride?: number | null; // Step2で使用
+}
 
 // ============================================================================
 // ユーティリティ
@@ -145,7 +152,7 @@ export interface ModelV2Result {
     notes: string[];           // デバッグ/メモ
 }
 
-export function computeModelV2(race: Race): ModelV2Result {
+export function computeModelV2(race: Race, opts: ModelV2Options = {}): ModelV2Result {
     const horses = race.horses;
     const notes: string[] = [];
 
@@ -316,25 +323,40 @@ export function computeModelV2(race: Race): ModelV2Result {
             factors.push({ label: '脚質×コース', delta: styleD });
         }
 
-        // 8) 騎手（統計代理）
-        if (overallFiMean != null && h.jockey && h.jockey !== '取得不可') {
+        // 8) 騎手（外部統計→proxy）
+        const jUrl = h.jockeyUrl || null;
+        const jStat = (jUrl && opts.jockeyStatsByUrl) ? opts.jockeyStatsByUrl.get(jUrl) : null;
+        if (jStat?.placeRate != null) {
+            // placeRateを使用（安定）。平均0.25を基準
+            const rel = clamp((jStat.placeRate - 0.25) / 0.08, -1, +1);
+            const d = 0.06 * rel;
+            logS += d;
+            factors.push({ label: '騎手(外部)', delta: d });
+        } else if (overallFiMean != null && h.jockey && h.jockey !== '取得不可') {
             const jm = jockeyMean.get(h.jockey);
             if (jm != null) {
                 const rel = clamp((jm - overallFiMean) / 0.15, -1, +1);
                 const d = 0.06 * rel;
                 logS += d;
-                factors.push({ label: '騎手力', delta: d });
+                factors.push({ label: '騎手(proxy)', delta: d });
             }
         }
 
-        // 9) 調教師（統計代理）
-        if (overallFiMean != null && h.trainer && h.trainer !== '取得不可') {
+        // 9) 調教師（外部統計→proxy）
+        const tUrl = h.trainerUrl || null;
+        const tStat = (tUrl && opts.trainerStatsByUrl) ? opts.trainerStatsByUrl.get(tUrl) : null;
+        if (tStat?.placeRate != null) {
+            const rel = clamp((tStat.placeRate - 0.25) / 0.08, -1, +1);
+            const d = 0.05 * rel;
+            logS += d;
+            factors.push({ label: '調教師(外部)', delta: d });
+        } else if (overallFiMean != null && h.trainer && h.trainer !== '取得不可') {
             const tm = trainerMean.get(h.trainer);
             if (tm != null) {
                 const rel = clamp((tm - overallFiMean) / 0.15, -1, +1);
                 const d = 0.05 * rel;
                 logS += d;
-                factors.push({ label: '調教師力', delta: d });
+                factors.push({ label: '調教師(proxy)', delta: d });
             }
         }
 

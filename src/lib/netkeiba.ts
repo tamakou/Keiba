@@ -188,8 +188,16 @@ async function getRaceDetailsNar(raceId: string): Promise<Race | null> {
         if (umabanText) number = parseInt(umabanText, 10);
         else number = parseInt($row.find('.Umaban').text().trim(), 10) || 0;
 
-        const jockey = $row.find('.Jockey a').text().trim() || $row.find('.Jockey').text().trim() || '取得不可';
-        const trainer = $row.find('.Trainer a').text().trim() || $row.find('.Trainer').text().trim() || '取得不可';
+        const jockeyA = $row.find('.Jockey a').first();
+        const trainerA = $row.find('.Trainer a').first();
+
+        const jockey = jockeyA.text().trim() || $row.find('.Jockey').text().trim() || '取得不可';
+        const trainer = trainerA.text().trim() || $row.find('.Trainer').text().trim() || '取得不可';
+
+        const jockeyHref = jockeyA.attr('href') || '';
+        const trainerHref = trainerA.attr('href') || '';
+        const jockeyUrl = jockeyHref ? absUrl(NAR_BASE, jockeyHref) : null;
+        const trainerUrl = trainerHref ? absUrl(NAR_BASE, trainerHref) : null;
 
         const weightStr = $row.find('.Weight').text().trim() || '取得不可';
         const weightMatch = weightStr.match(/\(([-+0-9]+)\)/);
@@ -209,6 +217,8 @@ async function getRaceDetailsNar(raceId: string): Promise<Race | null> {
             name,
             jockey,
             trainer,
+            jockeyUrl,
+            trainerUrl,
             weight: weightStr,
             weightChange,
             odds,
@@ -414,16 +424,24 @@ async function getRaceDetailsJra(raceId: string): Promise<Race | null> {
         const gate = parseInt(wakuText, 10) || 0;
         const number = parseInt(umabanText, 10) || 0;
 
+        const jockeyA = $row.find('.Jockey a').first();
+        const trainerA = $row.find('.Trainer a').first();
+
         const jockey =
-            $row.find('.Jockey a').text().trim() ||
+            jockeyA.text().trim() ||
             $row.find('.Jockey').text().trim() ||
             '取得不可';
 
         const trainer =
-            $row.find('.Trainer a').text().trim() ||
+            trainerA.text().trim() ||
             $row.find('.Trainer').text().trim() ||
             $row.find('td.Trainer').text().trim() ||
             '取得不可';
+
+        const jockeyHref = jockeyA.attr('href') || '';
+        const trainerHref = trainerA.attr('href') || '';
+        const jockeyUrl = jockeyHref ? absUrl(JRA_BASE, jockeyHref) : null;
+        const trainerUrl = trainerHref ? absUrl(JRA_BASE, trainerHref) : null;
 
         const weightStr = $row.find('.Weight').text().trim() || '取得不可';
         const weightMatch = weightStr.match(/\(([-+0-9]+)\)/);
@@ -444,6 +462,8 @@ async function getRaceDetailsJra(raceId: string): Promise<Race | null> {
             name,
             jockey,
             trainer,
+            jockeyUrl,
+            trainerUrl,
             weight: weightStr,
             weightChange,
             odds,
