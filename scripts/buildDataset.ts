@@ -1,8 +1,9 @@
 import fs from 'fs';
 import path from 'path';
 
-import { getRaceList } from '../src/lib/netkeiba';
-import { fetchRaceResult, System } from '../src/lib/resultParser';
+import { getRaceList, getRaceDetails } from '../src/lib/netkeiba';
+import { fetchRaceResult, System, RaceResult } from '../src/lib/resultParser';
+import { Race } from '../src/lib/types';
 
 type RaceSpec = { raceId: string; system: System };
 
@@ -30,9 +31,44 @@ function nextDay(yyyymmdd: string): string {
     return `${yy}${mm}${dd}`;
 }
 
+function cacheDir(): string {
+    return process.env.KEIBA_BT_CACHE_DIR || '.keiba_backtest_cache';
+}
+
+function cachePath(kind: 'race' | 'result', s: System, raceId: string): string {
+    return path.join(cacheDir(), `${kind}_${s}_${raceId}.json`);
+}
+
 function writeJson(p: string, obj: unknown): void {
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, JSON.stringify(obj, null, 2) + '\n', 'utf-8');
+}
+
+function readJsonIfExists<T>(fp: string): T | null {
+    try {
+        if (!fs.existsSync(fp)) return null;
+        return JSON.parse(fs.readFileSync(fp, 'utf-8')) as T;
+    } catch {
+        return null;
+    }
+}
+
+async function getCachedResult(raceId: string, system: System): Promise<RaceResult | null> {
+    const fp = cachePath('result', system, raceId);
+    const cached = readJsonIfExists<RaceResult>(fp);
+    if (cached) return cached;
+    const r = await fetchRaceResult(raceId, system);
+    if (r) writeJson(fp, r);
+    return r;
+}
+
+async function getCachedRace(raceId: string, system: System): Promise<Race | null> {
+    const fp = cachePath('race', system, raceId);
+    const cached = readJsonIfExists<Race>(fp);
+    if (cached) return cached;
+    const r = await getRaceDetails(raceId, system);
+    if (r) writeJson(fp, r);
+    return r;
 }
 
 async function main() {
@@ -69,8 +105,11 @@ async function main() {
                 if (seen.has(key)) continue;
 
                 // 結果があるレースだけ採用（確定済みを収集）
-                const res = await fetchRaceResult(r.id, sys);
+                const res = await getCachedResult(r.id, sys);
                 if (!res || !res.order?.length) continue;
+
+                // レース詳細も事前にキャッシュ
+                await getCachedRace(r.id, sys);
 
                 seen.add(key);
                 list.push({ raceId: r.id, system: sys });

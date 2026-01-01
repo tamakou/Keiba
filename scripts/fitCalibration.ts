@@ -193,26 +193,30 @@ async function main() {
     const p3: number[] = [], y3: number[] = [];
 
     for (const s of specs) {
-        const loaded = await loadOne(s);
-        if (!loaded) continue;
-        const { race, result } = loaded;
+        try {
+            const loaded = await loadOne(s);
+            if (!loaded) continue;
+            const { race, result } = loaded;
 
-        const base = computeModelV2(race, {});
-        const f = estimateFinishProbs(base.probs, mc, rng);
-        const nums = race.horses.map(h => h.number);
-        const winner = result.order[0];
-        const idxW = nums.findIndex(n => n === winner);
-        if (idxW < 0) continue;
+            const base = computeModelV2(race, {});
+            const f = estimateFinishProbs(base.probs, mc, rng);
+            const nums = race.horses.map(h => h.number);
+            const winner = result.order[0];
+            const idxW = nums.findIndex(n => n === winner);
+            if (idxW < 0) continue;
 
-        // win（温度校正用）
-        winSets.push({ win: f.win, winnerIdx: idxW });
+            // win（温度校正用）
+            winSets.push({ win: f.win, winnerIdx: idxW });
 
-        // Top2/Top3（Platt用）
-        const labels = buildTopK(result);
-        nums.forEach((n, i) => {
-            p2.push(f.top2[i]); y2.push(labels.top2.has(n) ? 1 : 0);
-            p3.push(f.top3[i]); y3.push(labels.top3.has(n) ? 1 : 0);
-        });
+            // Top2/Top3（Platt用）
+            const labels = buildTopK(result);
+            nums.forEach((n, i) => {
+                p2.push(f.top2[i]); y2.push(labels.top2.has(n) ? 1 : 0);
+                p3.push(f.top3[i]); y3.push(labels.top3.has(n) ? 1 : 0);
+            });
+        } catch (e) {
+            console.log(`[SKIP] ${s.system} ${s.raceId}: ${e}`);
+        }
     }
 
     if (winSets.length < 10) {

@@ -4,9 +4,50 @@ import path from 'path';
 import { getRaceDetails } from '../src/lib/netkeiba';
 import { computeModelV2 } from '../src/lib/modelV2';
 import { estimateFinishProbs } from '../src/lib/simulator';
-import { fetchRaceResult, System } from '../src/lib/resultParser';
+import { fetchRaceResult, System, RaceResult } from '../src/lib/resultParser';
+import { Race } from '../src/lib/types';
 
 type RaceSpec = { raceId: string; system: System };
+
+function cacheDir(): string {
+    return process.env.KEIBA_BT_CACHE_DIR || '.keiba_backtest_cache';
+}
+
+function cachePath(kind: 'race' | 'result', s: System, raceId: string): string {
+    return path.join(cacheDir(), `${kind}_${s}_${raceId}.json`);
+}
+
+function readJsonIfExists<T>(p: string): T | null {
+    try {
+        if (!fs.existsSync(p)) return null;
+        return JSON.parse(fs.readFileSync(p, 'utf-8')) as T;
+    } catch {
+        return null;
+    }
+}
+
+function writeJson(p: string, obj: unknown): void {
+    fs.mkdirSync(path.dirname(p), { recursive: true });
+    fs.writeFileSync(p, JSON.stringify(obj, null, 2) + '\n', 'utf-8');
+}
+
+async function getCachedRace(raceId: string, system: System): Promise<Race | null> {
+    const p = cachePath('race', system, raceId);
+    const cached = readJsonIfExists<Race>(p);
+    if (cached) return cached;
+    const r = await getRaceDetails(raceId, system);
+    if (r) writeJson(p, r);
+    return r;
+}
+
+async function getCachedResult(raceId: string, system: System): Promise<RaceResult | null> {
+    const p = cachePath('result', system, raceId);
+    const cached = readJsonIfExists<RaceResult>(p);
+    if (cached) return cached;
+    const r = await fetchRaceResult(raceId, system);
+    if (r) writeJson(p, r);
+    return r;
+}
 
 function arg(name: string, def?: string): string | undefined {
     const idx = process.argv.indexOf(name);
@@ -59,7 +100,7 @@ function clamp01(x: number): number {
 }
 
 async function predictWinTop3(raceId: string, system: System, seed: number, mcIters: number) {
-    const race = await getRaceDetails(raceId, system);
+    const race = await getCachedRace(raceId, system);
     if (!race) throw new Error(`Race not found: ${raceId} (${system})`);
     const rng = makeRng(seed ^ (parseInt(raceId.slice(-6), 10) || 0));
 
@@ -125,21 +166,21 @@ async function main() {
     const top3Y: number[] = [];
 
     for (const s of specs) {
-        const result = await fetchRaceResult(s.raceId, s.system);
-        if (!result || result.order.length === 0) {
-            console.log(`[SKIP] result parse failed ${s.system} ${s.raceId}`);
-            continue;
-        }
-        const winner = result.order[0];
-        // Top2: rank <= 2 （同着対応）
-        const top2Set = new Set<number>();
-        for (const [k, rnk] of Object.entries(result.rankByUmaban)) {
-            if (rnk <= 2) top2Set.add(parseInt(k, 10));
-        }
-        if (top2Set.size === 0) result.order.slice(0, 2).forEach(u => top2Set.add(u));
-        const top3Set = new Set(result.top3);
-
         try {
+            const result = await getCachedResult(s.raceId, s.system);
+            if (!result || result.order.length === 0) {
+                console.log(`[SKIP] result parse failed ${s.system} ${s.raceId}`);
+                continue;
+            }
+            const winner = result.order[0];
+            // Top2: rank <= 2 （同着対応）
+            const top2Set = new Set<number>();
+            for (const [k, rnk] of Object.entries(result.rankByUmaban)) {
+                if (rnk <= 2) top2Set.add(parseInt(k, 10));
+            }
+            if (top2Set.size === 0) result.order.slice(0, 2).forEach(u => top2Set.add(u));
+            const top3Set = new Set(result.top3);
+
             const pred = await predictWinTop3(s.raceId, s.system, seed, mcIters);
             const idx = pred.nums.findIndex(n => n === winner);
             if (idx < 0) continue;
