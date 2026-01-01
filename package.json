@@ -8,7 +8,8 @@
     "start": "next start",
     "lint": "eslint",
     "backtest": "tsx scripts/backtest.ts --data data/backtest_races.json",
-    "optimize": "tsx scripts/optimizeWeights.ts --data data/backtest_races.json --iters 120 --sigma 0.15 --out data/modelWeights.json"
+    "optimize": "tsx scripts/optimizeWeights.ts --data data/backtest_races.json --iters 120 --sigma 0.15 --out data/modelWeights.json",
+    "audit": "tsx scripts/datasetAudit.ts --data data/backtest_races.json"
   },
   "dependencies": {
     "cheerio": "^1.1.2",

@@ -1,13 +1,11 @@
 import fs from 'fs';
 import path from 'path';
-import * as cheerio from 'cheerio';
 
 import { getRaceDetails } from '../src/lib/netkeiba';
 import { computeModelV2 } from '../src/lib/modelV2';
-import { fetchHtmlAuto } from '../src/lib/htmlFetch';
-import { getModelWeights } from '../src/lib/modelWeights';
+import { estimateFinishProbs } from '../src/lib/simulator';
+import { fetchRaceResult, System } from '../src/lib/resultParser';
 
-type System = 'JRA' | 'NAR';
 type RaceSpec = { raceId: string; system: System };
 
 function arg(name: string, def?: string): string | undefined {
@@ -16,100 +14,107 @@ function arg(name: string, def?: string): string | undefined {
     return def;
 }
 
+function makeRng(seed: number): () => number {
+    let s = (seed >>> 0) || 1;
+    return () => {
+        s = (s * 1664525 + 1013904223) >>> 0;
+        return s / 4294967296;
+    };
+}
+
 function softmax3(a: number, b: number, c: number): [number, number, number] {
     const ea = Math.exp(a), eb = Math.exp(b), ec = Math.exp(c);
     const s = ea + eb + ec;
     return [ea / s, eb / s, ec / s];
 }
 
-async function fetchResultTop3(raceId: string, system: System): Promise<number[] | null> {
-    const base = system === 'JRA' ? 'https://race.netkeiba.com' : 'https://nar.netkeiba.com';
-    const url = `${base}/race/result.html?race_id=${raceId}`;
-    const res = await fetchHtmlAuto(url);
-    const $ = cheerio.load(res.html);
-
-    // 候補テーブルを広めに探索
-    const tables = [
-        'table.RaceTable01',
-        'table.Result_Table',
-        'table#All_Result_Table',
-        'table',
-    ];
-
-    let bestRows: any[] = [];
-    for (const sel of tables) {
-        const rows = $(sel).find('tr').toArray();
-        if (rows.length > bestRows.length) bestRows = rows;
-    }
-
-    const found: { rank: number; umaban: number }[] = [];
-
-    for (const tr of bestRows) {
-        const $tr = $(tr);
-        const rankText =
-            $tr.find('td.Rank').text().trim() ||
-            $tr.find('td').first().text().trim();
-        const r = parseInt(rankText, 10);
-        if (!Number.isFinite(r) || r < 1 || r > 3) continue;
-
-        const umabanText =
-            $tr.find('td.Umaban').text().trim() ||
-            $tr.find('.Umaban').text().trim() ||
-            $tr.find('td.Num').text().trim();
-        const u = parseInt(umabanText, 10);
-        if (!Number.isFinite(u) || u <= 0) continue;
-
-        found.push({ rank: r, umaban: u });
-    }
-
-    if (found.length === 0) return null;
-    found.sort((a, b) => a.rank - b.rank);
-    return found.map(x => x.umaban).slice(0, 3);
+function mean(arr: number[]): number {
+    if (arr.length === 0) return 0;
+    return arr.reduce((a, b) => a + b, 0) / arr.length;
 }
 
-function brier(probs: Map<number, number>, winner: number): number {
-    let s = 0;
-    for (const [num, p] of probs.entries()) {
-        const y = (num === winner) ? 1 : 0;
-        s += (p - y) * (p - y);
+function ece(probs: number[], labels: number[], bins = 10): number {
+    const n = probs.length;
+    if (n === 0) return 0;
+    let e = 0;
+    for (let b = 0; b < bins; b++) {
+        const lo = b / bins;
+        const hi = (b + 1) / bins;
+        let cnt = 0, ps = 0, ys = 0;
+        for (let i = 0; i < n; i++) {
+            const p = probs[i];
+            if ((b === 0 ? p >= lo : p > lo) && p <= hi) {
+                cnt++;
+                ps += p;
+                ys += labels[i];
+            }
+        }
+        if (cnt > 0) {
+            const ap = ps / cnt;
+            const ay = ys / cnt;
+            e += (cnt / n) * Math.abs(ap - ay);
+        }
     }
-    return s;
+    return e;
 }
 
-async function predictWinProbs(raceId: string, system: System): Promise<{ probs: Map<number, number>; top3: number[]; note: string }> {
+function clamp01(x: number): number {
+    return Math.max(0, Math.min(1, x));
+}
+
+async function predictWinTop3Probs(raceId: string, system: System, rng: () => number, mcIters: number): Promise<{
+    win: Map<number, number>;
+    top3: Map<number, number>;
+    note: string;
+}> {
     const race = await getRaceDetails(raceId, system);
     if (!race) throw new Error(`Race not found: ${raceId} (${system})`);
-
-    // 重みはファイルからロード（最適化の成果が反映される）
-    const _w = getModelWeights();
 
     // 外部統計は backtest ではデフォルトOFF推奨（負荷対策）
     const v2 = computeModelV2(race, {});
 
-    // 3ペースシナリオ（winner確率だけなら線形合成でOK）
     const useMixture = (process.env.KEIBA_BACKTEST_USE_PACE_MIXTURE ?? '1') === '1';
-    let win = v2.probs;
     let note = `pace=${v2.paceIndex.toFixed(2)}`;
+
+    const horseNumbers = race.horses.map(h => h.number);
+
+    const mix = (a: number[], b: number[], c: number[], w: [number, number, number]) =>
+        a.map((_, i) => w[0] * a[i] + w[1] * b[i] + w[2] * c[i]);
+
+    let winP: number[] = [];
+    let top3P: number[] = [];
 
     if (useMixture) {
         const pace = v2.paceIndex;
         const paceShift = Number(process.env.KEIBA_PACE_SHIFT || '') || 0.6;
         const scale = Number(process.env.KEIBA_PACE_SOFTMAX_SCALE || '') || 1.2;
         const normalBias = Number(process.env.KEIBA_PACE_NORMAL_BIAS || '') || 0.8;
-        const [pSlow, pNormal, pFast] = softmax3(-scale * pace, normalBias, +scale * pace);
+        const w = softmax3(-scale * pace, normalBias, +scale * pace);
 
-        const slow = computeModelV2(race, { paceOverride: Math.max(-1, pace - paceShift) });
-        const fast = computeModelV2(race, { paceOverride: Math.min(+1, pace + paceShift) });
+        const slowW = computeModelV2(race, { paceOverride: Math.max(-1, pace - paceShift) });
+        const fastW = computeModelV2(race, { paceOverride: Math.min(+1, pace + paceShift) });
 
-        win = win.map((_, i) => pSlow * slow.probs[i] + pNormal * v2.probs[i] + pFast * fast.probs[i]);
-        note = `paceMix pSlow=${pSlow.toFixed(2)} pN=${pNormal.toFixed(2)} pF=${pFast.toFixed(2)} basePace=${pace.toFixed(2)}`;
+        const slowF = estimateFinishProbs(slowW.probs, mcIters, rng);
+        const normF = estimateFinishProbs(v2.probs, mcIters, rng);
+        const fastF = estimateFinishProbs(fastW.probs, mcIters, rng);
+
+        winP = mix(slowF.win, normF.win, fastF.win, w);
+        top3P = mix(slowF.top3, normF.top3, fastF.top3, w);
+        note = `paceMix pSlow=${w[0].toFixed(2)} pN=${w[1].toFixed(2)} pF=${w[2].toFixed(2)} basePace=${pace.toFixed(2)}`;
+    } else {
+        const f = estimateFinishProbs(v2.probs, mcIters, rng);
+        winP = f.win;
+        top3P = f.top3;
     }
 
-    const probs = new Map<number, number>();
-    race.horses.forEach((h, i) => probs.set(h.number, win[i]));
+    const win = new Map<number, number>();
+    const top3 = new Map<number, number>();
+    horseNumbers.forEach((n, i) => {
+        win.set(n, clamp01(winP[i]));
+        top3.set(n, clamp01(top3P[i]));
+    });
 
-    const top3 = [...probs.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(x => x[0]);
-    return { probs, top3, note };
+    return { win, top3, note };
 }
 
 async function main() {
@@ -120,50 +125,77 @@ async function main() {
         process.exit(0);
     }
 
-    let n = 0;
+    const seed = Number(arg('--seed', process.env.KEIBA_BACKTEST_SEED || '12345'));
+    const mcIters = Number(arg('--mc', process.env.KEIBA_BACKTEST_MC_ITERATIONS || '8000'));
+    const bins = Number(arg('--bins', process.env.KEIBA_ECE_BINS || '10'));
+
+    let raceN = 0;
     let ll = 0;
-    let br = 0;
     let top1 = 0;
-    let top3hit = 0;
+    let winnerInPredTop3 = 0;
+
+    // 全馬サンプルで集計（頭数依存を排除）
+    const winP: number[] = [];
+    const winY: number[] = [];
+    const top3P: number[] = [];
+    const top3Y: number[] = [];
 
     for (const r of json) {
         try {
-            const top = await fetchResultTop3(r.raceId, r.system);
-            if (!top || top.length === 0) {
+            const result = await fetchRaceResult(r.raceId, r.system);
+            if (!result || result.order.length === 0) {
                 console.log(`[SKIP] result parse failed ${r.system} ${r.raceId}`);
                 continue;
             }
-            const winner = top[0];
+            const winner = result.order[0];
+            const top3Set = new Set(result.top3);
 
-            const pred = await predictWinProbs(r.raceId, r.system);
-            const p = pred.probs.get(winner) ?? 1e-12;
+            const rng = makeRng(seed ^ (parseInt(r.raceId.slice(-6), 10) || 0));
+            const pred = await predictWinTop3Probs(r.raceId, r.system, rng, mcIters);
+            const p = pred.win.get(winner) ?? 1e-12;
             const pSafe = Math.max(1e-12, Math.min(1, p));
 
             ll += -Math.log(pSafe);
-            br += brier(pred.probs, winner);
-            n += 1;
+            raceN += 1;
 
-            const best = [...pred.probs.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+            const best = [...pred.win.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
+            const predTop3 = [...pred.win.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(x => x[0]);
             if (best === winner) top1 += 1;
-            if (pred.top3.includes(winner)) top3hit += 1;
+            if (predTop3.includes(winner)) winnerInPredTop3 += 1;
 
-            console.log(`[OK] ${r.system} ${r.raceId} win=${winner} p=${pSafe.toFixed(4)} top3Pred=${pred.top3.join(',')} note=${pred.note}`);
+            // 全馬サンプル集計（win / top3）
+            for (const [num, pw] of pred.win.entries()) {
+                winP.push(clamp01(pw));
+                winY.push(num === winner ? 1 : 0);
+
+                const pt = pred.top3.get(num) ?? 0;
+                top3P.push(clamp01(pt));
+                top3Y.push(top3Set.has(num) ? 1 : 0);
+            }
+
+            console.log(`[OK] ${r.system} ${r.raceId} win=${winner} pWin=${pSafe.toFixed(4)} predTop3=${predTop3.join(',')} note=${pred.note}`);
         } catch (e) {
             console.log(`[ERROR] ${r.system} ${r.raceId}: ${e}`);
         }
     }
 
-    if (n === 0) {
+    if (raceN === 0) {
         console.log('No evaluated races.');
         process.exit(0);
     }
 
+    const brierWin = mean(winP.map((p, i) => (p - winY[i]) ** 2));
+    const brierTop3 = mean(top3P.map((p, i) => (p - top3Y[i]) ** 2));
+    const eceWin = ece(winP, winY, bins);
+    const eceTop3 = ece(top3P, top3Y, bins);
+
     console.log('--- Summary ---');
-    console.log(`N=${n}`);
-    console.log(`LogLoss=${(ll / n).toFixed(6)}`);
-    console.log(`Brier=${(br / n).toFixed(6)}`);
-    console.log(`Top1Acc=${(top1 / n).toFixed(3)}`);
-    console.log(`Top3Hit(winner in top3)=${(top3hit / n).toFixed(3)}`);
+    console.log(`Races=${raceN}  MC=${mcIters}  bins=${bins}`);
+    console.log(`LogLoss(win)=${(ll / raceN).toFixed(6)}`);
+    console.log(`Brier(win)=${brierWin.toFixed(6)}  ECE(win)=${eceWin.toFixed(6)}`);
+    console.log(`Brier(top3)=${brierTop3.toFixed(6)} ECE(top3)=${eceTop3.toFixed(6)}`);
+    console.log(`Top1Acc=${(top1 / raceN).toFixed(3)}`);
+    console.log(`WinnerInPredTop3=${(winnerInPredTop3 / raceN).toFixed(3)}`);
 }
 
 main().catch(e => {
