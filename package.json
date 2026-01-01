@@ -12,7 +12,7 @@
     "audit:fetch": "tsx scripts/auditDataset.ts --data data/backtest_races.json --fetch 1 --out data/backtest_audit.json",
     "backtest": "tsx scripts/backtest.ts --data data/backtest_races.json",
     "backtest:holdout": "tsx scripts/backtest.ts --data data/backtest_holdout.json",
-    "optimize": "tsx scripts/optimizeWeights.ts --data data/backtest_train.json --iters 120 --sigma 0.15 --mc 1500 --bins 10 --lambda_top3_brier 0.6 --lambda_top3_ece 1.2 --mix 1 --out data/modelWeights.json"
+    "optimize": "tsx scripts/optimizeWeights.ts --data data/backtest_train.json --iters 120 --sigma 0.15 --mc 1500 --bins 10 --lambda_top2_brier 0.4 --lambda_top2_ece 0.8 --lambda_top3_brier 0.6 --lambda_top3_ece 1.2 --mix 1 --out data/modelWeights.json"
   },
   "dependencies": {
     "cheerio": "^1.1.2",

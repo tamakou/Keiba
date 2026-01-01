@@ -67,6 +67,7 @@ async function predictWinTop3(raceId: string, system: System, seed: number, mcIt
     const useMixture = (process.env.KEIBA_BACKTEST_USE_PACE_MIXTURE ?? '1') === '1';
 
     let winArr: number[] = [];
+    let top2Arr: number[] = [];
     let top3Arr: number[] = [];
     let note = `pace=${base.paceIndex.toFixed(2)}`;
 
@@ -85,16 +86,18 @@ async function predictWinTop3(raceId: string, system: System, seed: number, mcIt
         const fFast = estimateFinishProbs(fast.probs, mcIters, rng);
 
         winArr = fSlow.win.map((_, i) => w[0] * fSlow.win[i] + w[1] * fNorm.win[i] + w[2] * fFast.win[i]);
+        top2Arr = fSlow.top2.map((_, i) => w[0] * fSlow.top2[i] + w[1] * fNorm.top2[i] + w[2] * fFast.top2[i]);
         top3Arr = fSlow.top3.map((_, i) => w[0] * fSlow.top3[i] + w[1] * fNorm.top3[i] + w[2] * fFast.top3[i]);
         note = `paceMix pSlow=${w[0].toFixed(2)} pN=${w[1].toFixed(2)} pF=${w[2].toFixed(2)} basePace=${pace.toFixed(2)}`;
     } else {
         const f = estimateFinishProbs(base.probs, mcIters, rng);
         winArr = f.win;
+        top2Arr = f.top2;
         top3Arr = f.top3;
     }
 
     const nums = race.horses.map(h => h.number);
-    return { race, nums, winArr: winArr.map(clamp01), top3Arr: top3Arr.map(clamp01), note };
+    return { race, nums, winArr: winArr.map(clamp01), top2Arr: top2Arr.map(clamp01), top3Arr: top3Arr.map(clamp01), note };
 }
 
 async function main() {
@@ -116,6 +119,8 @@ async function main() {
 
     const winP: number[] = [];
     const winY: number[] = [];
+    const top2P: number[] = [];
+    const top2Y: number[] = [];
     const top3P: number[] = [];
     const top3Y: number[] = [];
 
@@ -126,6 +131,12 @@ async function main() {
             continue;
         }
         const winner = result.order[0];
+        // Top2: rank <= 2 （同着対応）
+        const top2Set = new Set<number>();
+        for (const [k, rnk] of Object.entries(result.rankByUmaban)) {
+            if (rnk <= 2) top2Set.add(parseInt(k, 10));
+        }
+        if (top2Set.size === 0) result.order.slice(0, 2).forEach(u => top2Set.add(u));
         const top3Set = new Set(result.top3);
 
         try {
@@ -151,6 +162,8 @@ async function main() {
             pred.nums.forEach((n, i) => {
                 winP.push(pred.winArr[i]);
                 winY.push(n === winner ? 1 : 0);
+                top2P.push(pred.top2Arr[i]);
+                top2Y.push(top2Set.has(n) ? 1 : 0);
                 top3P.push(pred.top3Arr[i]);
                 top3Y.push(top3Set.has(n) ? 1 : 0);
             });
@@ -167,14 +180,17 @@ async function main() {
     }
 
     const brierWin = mean(winP.map((p, i) => (p - winY[i]) ** 2));
+    const brierTop2 = mean(top2P.map((p, i) => (p - top2Y[i]) ** 2));
     const brierTop3 = mean(top3P.map((p, i) => (p - top3Y[i]) ** 2));
     const eceWin = ece(winP, winY, bins);
+    const eceTop2 = ece(top2P, top2Y, bins);
     const eceTop3 = ece(top3P, top3Y, bins);
 
     console.log('--- Summary ---');
     console.log(`Races=${raceN}  MC=${mcIters}  bins=${bins}`);
     console.log(`LogLoss(win)=${(ll / raceN).toFixed(6)}`);
     console.log(`Brier(win)=${brierWin.toFixed(6)}  ECE(win)=${eceWin.toFixed(6)}`);
+    console.log(`Brier(top2)=${brierTop2.toFixed(6)} ECE(top2)=${eceTop2.toFixed(6)}`);
     console.log(`Brier(top3)=${brierTop3.toFixed(6)} ECE(top3)=${eceTop3.toFixed(6)}`);
     console.log(`Top1Acc=${(top1 / raceN).toFixed(3)}`);
     console.log(`WinnerInPredTop3=${(winnerInPredTop3 / raceN).toFixed(3)}`);
