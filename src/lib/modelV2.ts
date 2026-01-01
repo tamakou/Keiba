@@ -5,7 +5,7 @@
 import { Race, Horse, HorseRun } from './types';
 import { normalizeBaba, parseRaceCourse, parseSurfaceDistance, Surface, Baba } from './courseParse';
 import { findCourseProfile, estimatePaceIndex, CourseProfile } from './courseProfiles';
-import { PersonStats } from './externalStats';
+import { PersonStats, canonicalDbUrl } from './externalStats';
 
 export interface ModelV2Options {
     jockeyStatsByUrl?: Map<string, PersonStats>;
@@ -150,6 +150,7 @@ export interface ModelV2Result {
     probs: number[];           // 各馬の勝率推定
     factorStrings: string[][]; // 各馬の主要因（表示用）
     notes: string[];           // デバッグ/メモ
+    paceIndex: number;         // ペース指数 (-1..+1)
 }
 
 export function computeModelV2(race: Race, opts: ModelV2Options = {}): ModelV2Result {
@@ -218,8 +219,9 @@ export function computeModelV2(race: Race, opts: ModelV2Options = {}): ModelV2Re
         else if (s === 'Mid') styleDistribution.mid++;
         else if (s === 'Closer') styleDistribution.closer++;
     });
-    const paceIndex = clamp(estimatePaceIndex(styleDistribution), -1, 1);
-    notes.push(`ペース推定: ${paceIndex.toFixed(2)} (前${styleDistribution.front}/先${styleDistribution.stalker}/中${styleDistribution.mid}/差${styleDistribution.closer})`);
+    const paceIndexRaw = clamp(estimatePaceIndex(styleDistribution), -1, 1);
+    const paceIndex = (opts.paceOverride != null) ? clamp(opts.paceOverride, -1, 1) : paceIndexRaw;
+    notes.push(`ペース推定: ${paceIndex.toFixed(2)} (前${styleDistribution.front}/先${styleDistribution.stalker}/中${styleDistribution.mid}/差${styleDistribution.closer})${opts.paceOverride != null ? ' [override]' : ''}`);;
 
     // 距離×脚質バイアス
     const isSprint = distance != null && distance <= 1400;
@@ -324,7 +326,7 @@ export function computeModelV2(race: Race, opts: ModelV2Options = {}): ModelV2Re
         }
 
         // 8) 騎手（外部統計→proxy）
-        const jUrl = h.jockeyUrl || null;
+        const jUrl = h.jockeyUrl ? canonicalDbUrl(h.jockeyUrl, 'jockey') : null;
         const jStat = (jUrl && opts.jockeyStatsByUrl) ? opts.jockeyStatsByUrl.get(jUrl) : null;
         if (jStat?.placeRate != null) {
             // placeRateを使用（安定）。平均0.25を基準
@@ -343,7 +345,7 @@ export function computeModelV2(race: Race, opts: ModelV2Options = {}): ModelV2Re
         }
 
         // 9) 調教師（外部統計→proxy）
-        const tUrl = h.trainerUrl || null;
+        const tUrl = h.trainerUrl ? canonicalDbUrl(h.trainerUrl, 'trainer') : null;
         const tStat = (tUrl && opts.trainerStatsByUrl) ? opts.trainerStatsByUrl.get(tUrl) : null;
         if (tStat?.placeRate != null) {
             const rel = clamp((tStat.placeRate - 0.25) / 0.08, -1, +1);
@@ -380,5 +382,5 @@ export function computeModelV2(race: Race, opts: ModelV2Options = {}): ModelV2Re
     const sum = rawScores.reduce((a, b) => a + b, 0);
     const probs = sum > 0 ? rawScores.map(s => s / sum) : rawScores.map(() => 1 / rawScores.length);
 
-    return { probs, factorStrings, notes };
+    return { probs, factorStrings, notes, paceIndex };
 }

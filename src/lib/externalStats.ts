@@ -15,7 +15,7 @@ export interface PersonStats {
     note?: string;
 }
 
-function canonicalDbUrl(url: string, kind: 'jockey' | 'trainer'): string | null {
+export function canonicalDbUrl(url: string, kind: 'jockey' | 'trainer'): string | null {
     if (!url) return null;
     // 既にdb形式
     if (url.includes('db.netkeiba.com') && url.includes(`/${kind}/`)) return url;

@@ -6,6 +6,7 @@ import path from 'path';
 
 type Entry<T> = { value: T; expiresAt: number };
 const mem = new Map<string, Entry<any>>();
+const inFlight = new Map<string, Promise<any>>();
 
 function now(): number {
     return Date.now();
@@ -72,9 +73,23 @@ export function setCache<T>(key: string, value: T, ttlMs: number): void {
 export async function getOrSetCache<T>(key: string, ttlMs: number, loader: () => Promise<T>): Promise<T> {
     const hit = getCache<T>(key);
     if (hit != null) return hit;
-    const v = await loader();
-    setCache(key, v, ttlMs);
-    return v;
+
+    // in-flight dedupe: 同時に同じキーを取りに来た場合は既存のPromiseを返す
+    const existing = inFlight.get(key);
+    if (existing) return existing as Promise<T>;
+
+    const p = (async () => {
+        try {
+            const v = await loader();
+            setCache(key, v, ttlMs);
+            return v;
+        } finally {
+            inFlight.delete(key);
+        }
+    })();
+
+    inFlight.set(key, p);
+    return p;
 }
 
 // 同時接続制限つきPromiseプール

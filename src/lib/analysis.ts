@@ -1,9 +1,17 @@
 // src/lib/analysis.ts
 import { Race, Horse, BettingPortfolio, BettingTip, BetType } from './types';
-import { estimateFinishProbs, estimateBetEventProbs, FinishProbs, BetEventProbs } from './simulator';
+import {
+    estimateFinishProbs,
+    estimateBetEventProbs,
+    estimateFinishProbsMixture,
+    estimateBetEventProbsMixture,
+    ScenarioWeights,
+    FinishProbs,
+    BetEventProbs
+} from './simulator';
 import { buildOptimizedPortfolios, OptimizeSettings } from './optimizer';
 import { computeModelV2, ModelV2Options } from './modelV2';
-import { fetchJockeyStats, fetchTrainerStats, PersonStats } from './externalStats';
+import { fetchJockeyStats, fetchTrainerStats, PersonStats, canonicalDbUrl } from './externalStats';
 import { runWithConcurrency } from './cache';
 
 export interface AnalyzeOptions {
@@ -184,8 +192,17 @@ export async function analyzeRace(race: Race, opts: AnalyzeOptions = {}): Promis
     const sourceSet = new Set<string>();
 
     if (enableExternal) {
-        const jUrls = Array.from(new Set(horses.map(h => h.jockeyUrl).filter((u): u is string => !!u)));
-        const tUrls = Array.from(new Set(horses.map(h => h.trainerUrl).filter((u): u is string => !!u)));
+        // canonical URLで統一（キャッシュ効率改善）
+        const jUrls = Array.from(new Set(
+            horses
+                .map(h => h.jockeyUrl ? canonicalDbUrl(h.jockeyUrl, 'jockey') : null)
+                .filter((u): u is string => !!u)
+        ));
+        const tUrls = Array.from(new Set(
+            horses
+                .map(h => h.trainerUrl ? canonicalDbUrl(h.trainerUrl, 'trainer') : null)
+                .filter((u): u is string => !!u)
+        ));
 
         notes.push(`外部統計: jockey=${jUrls.length} trainer=${tUrls.length} (ttl=${ttlMs}ms, conc=${conc})`);
 
@@ -224,19 +241,68 @@ export async function analyzeRace(race: Race, opts: AnalyzeOptions = {}): Promis
     const v2 = computeModelV2(race, v2Opts);
     notes.push(...v2.notes);
 
+    // ---------------------------
+    // Step2: Pace 3-scenario mixture (SLOW/NORMAL/FAST)
+    // ---------------------------
+    const enablePaceMixture = process.env.KEIBA_ENABLE_PACE_MIXTURE !== '0'; // default ON
+    const mcIterations = Number(process.env.KEIBA_MC_ITERATIONS || '') || 20000;
+    const rng = Math.random;
+    const kPlace = topKForPlace(horses.length);
+    const horseNumbers = horses.map(h => h.number);
+
+    let finishProbs: FinishProbs;
+    let betEvents: BetEventProbs;
+
+    if (enablePaceMixture) {
+        const pace = v2.paceIndex; // -1..+1
+        const paceShift = Number(process.env.KEIBA_PACE_SHIFT || '') || 0.6;
+        const scale = Number(process.env.KEIBA_PACE_SOFTMAX_SCALE || '') || 1.2;
+        const normalBias = Number(process.env.KEIBA_PACE_NORMAL_BIAS || '') || 0.8;
+
+        const softmax3 = (a: number, b: number, c: number): [number, number, number] => {
+            const ea = Math.exp(a), eb = Math.exp(b), ec = Math.exp(c);
+            const s = ea + eb + ec;
+            return [ea / s, eb / s, ec / s];
+        };
+
+        const [pSlow, pNormal, pFast] = softmax3(-scale * pace, normalBias, +scale * pace);
+        notes.push(`PaceMixture: pace=${pace.toFixed(2)} pSlow=${pSlow.toFixed(2)} pNormal=${pNormal.toFixed(2)} pFast=${pFast.toFixed(2)} it=${mcIterations}`);
+
+        const v2Slow = computeModelV2(race, { ...v2Opts, paceOverride: Math.max(-1, pace - paceShift) });
+        const v2Fast = computeModelV2(race, { ...v2Opts, paceOverride: Math.min(+1, pace + paceShift) });
+
+        const scenarios: ScenarioWeights[] = [
+            { p: pSlow, weights: v2Slow.probs },
+            { p: pNormal, weights: v2.probs },
+            { p: pFast, weights: v2Fast.probs },
+        ];
+
+        finishProbs = estimateFinishProbsMixture(scenarios, mcIterations, rng);
+        betEvents = estimateBetEventProbsMixture(scenarios, mcIterations, kPlace, horseNumbers, rng);
+    } else {
+        finishProbs = estimateFinishProbs(v2.probs, mcIterations, rng);
+        betEvents = estimateBetEventProbs(v2.probs, mcIterations, kPlace, horseNumbers, rng);
+    }
+
     horses.forEach((h, i) => {
-        h.estimatedProb = v2.probs[i];
+        // 根拠表示はNORMALモデル
         h.factors = v2.factorStrings[i];
-        // オッズがある時だけEV計算
+
+        // 確率はペース不確実性込み（混合MC）
+        h.estimatedProb = finishProbs.win[i];
+        h.modelTop2Prob = finishProbs.top2[i];
+        h.modelTop3Prob = finishProbs.top3[i];
+
+        // fairOdds（オッズ非依存）
+        h.fairOdds = (h.estimatedProb > 0) ? (1 / h.estimatedProb) : null;
+
+        // EVは市場オッズがあるときだけ
         h.ev = (h.odds != null && h.odds > 0) ? (h.estimatedProb * h.odds - 1) : null;
-        // フェアオッズ（オッズ無し時の参考用）
-        h.fairOdds = h.estimatedProb > 0 ? 1 / h.estimatedProb : null;
     });
 
     // upsetIndex: 確率順位で"穴っぽさ"を作る（dream選定用）
     const sorted = [...horses].map((h, i) => ({ i, p: h.estimatedProb })).sort((a, b) => b.p - a.p);
     sorted.forEach((x, rank) => {
-        // 上位3は0、4〜8は0.3、9位以下は0.6（dreamで拾いやすく）
         const idx = rank <= 2 ? 0 : rank <= 7 ? 0.3 : 0.6;
         horses[x.i].upsetIndex = idx;
     });
@@ -246,29 +312,14 @@ export async function analyzeRace(race: Race, opts: AnalyzeOptions = {}): Promis
         notes.push('Model v2: オッズ不完全のため確率ベース分析（フェアオッズ=1/probを参照）');
     }
 
-    // Monte Carlo（Top2/Top3）
-    const iterations = 20000;
-    const modelWin = horses.map(h => h.estimatedProb);
-    const modelProbs = estimateFinishProbs(modelWin, iterations, Math.random);
-
-    horses.forEach((h, i) => {
-        h.modelTop2Prob = modelProbs.top2[i];
-        h.modelTop3Prob = modelProbs.top3[i];
-    });
-
     if (allOddsAvailable) {
         const marketWin = horses.map(h => h.marketProb!);
-        const marketProbs = estimateFinishProbs(marketWin, iterations, Math.random);
+        const marketProbs = estimateFinishProbs(marketWin, mcIterations, Math.random);
         horses.forEach((h, i) => {
             h.marketTop2Prob = marketProbs.top2[i];
             h.marketTop3Prob = marketProbs.top3[i];
         });
     }
-
-    // 券種イベント確率
-    const kPlace = topKForPlace(horses.length);
-    const horseNumbers = horses.map(h => h.number);
-    const betEvents = estimateBetEventProbs(modelWin, iterations, kPlace, horseNumbers, Math.random);
 
     // --- ここから最適化 ---
     const enableOptimization = opts.enableOptimization ?? true;
@@ -286,8 +337,8 @@ export async function analyzeRace(race: Race, opts: AnalyzeOptions = {}): Promis
 
         const opt = buildOptimizedPortfolios({
             race,
-            modelWin,
-            modelProbs,
+            modelWin: finishProbs.win,
+            modelProbs: finishProbs,
             betEvents,
             kPlace,
             settings,
@@ -307,7 +358,7 @@ export async function analyzeRace(race: Race, opts: AnalyzeOptions = {}): Promis
     // Tipに prob/odds/ev を付与（既存UI互換）
     const placeProbByNum: Record<number, number> = {};
     horses.forEach((h, i) => {
-        const pPlace = (kPlace === 1) ? modelProbs.win[i] : (kPlace === 2) ? modelProbs.top2[i] : modelProbs.top3[i];
+        const pPlace = (kPlace === 1) ? finishProbs.win[i] : (kPlace === 2) ? finishProbs.top2[i] : finishProbs.top3[i];
         placeProbByNum[h.number] = pPlace;
     });
 
@@ -354,7 +405,7 @@ export async function analyzeRace(race: Race, opts: AnalyzeOptions = {}): Promis
     }
 
     race.analysis = {
-        iterations,
+        iterations: mcIterations,
         notes,
         marketAvailable: allOddsAvailable,
         modelAvailable: true,

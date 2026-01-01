@@ -139,3 +139,100 @@ export function estimateBetEventProbs(
 
     return { wideTopK, umaren, sanrenpuku, umatan, sanrentan };
 }
+
+// ---------------------------
+// Pace scenario mixture
+// ---------------------------
+export type ScenarioWeights = { p: number; weights: number[] };
+
+function pickScenarioIndex(probs: number[], rng: () => number): number {
+    const s = probs.reduce((a, b) => a + b, 0);
+    if (s <= 0) return 0;
+    const r = rng() * s;
+    let acc = 0;
+    for (let i = 0; i < probs.length; i++) {
+        acc += probs[i];
+        if (r <= acc) return i;
+    }
+    return probs.length - 1;
+}
+
+export function estimateFinishProbsMixture(
+    scenarios: ScenarioWeights[],
+    iterations: number,
+    rng: () => number
+): FinishProbs {
+    const n = scenarios[0].weights.length;
+    const win = Array(n).fill(0);
+    const top2 = Array(n).fill(0);
+    const top3 = Array(n).fill(0);
+
+    const probs = scenarios.map(s => s.p);
+    for (let t = 0; t < iterations; t++) {
+        const si = pickScenarioIndex(probs, rng);
+        const order = sampleOrderPlackettLuce(scenarios[si].weights, rng);
+        if (order.length > 0) win[order[0]] += 1;
+        if (order.length > 0) top2[order[0]] += 1;
+        if (order.length > 1) top2[order[1]] += 1;
+        if (order.length > 0) top3[order[0]] += 1;
+        if (order.length > 1) top3[order[1]] += 1;
+        if (order.length > 2) top3[order[2]] += 1;
+    }
+    for (let i = 0; i < n; i++) {
+        win[i] /= iterations;
+        top2[i] /= iterations;
+        top3[i] /= iterations;
+    }
+    return { win, top2, top3 };
+}
+
+export function estimateBetEventProbsMixture(
+    scenarios: ScenarioWeights[],
+    iterations: number,
+    topKForPlace: number,
+    horseNumbers: number[],
+    rng: () => number
+): BetEventProbs {
+    const wideTopK: Record<string, number> = {};
+    const umaren: Record<string, number> = {};
+    const sanrenpuku: Record<string, number> = {};
+    const umatan: Record<string, number> = {};
+    const sanrentan: Record<string, number> = {};
+
+    const probs = scenarios.map(s => s.p);
+    for (let t = 0; t < iterations; t++) {
+        const si = pickScenarioIndex(probs, rng);
+        const order = sampleOrderPlackettLuce(scenarios[si].weights, rng);
+
+        const placed = order.slice(0, topKForPlace).map(i => horseNumbers[i]);
+        for (let i = 0; i < placed.length; i++) {
+            for (let j = i + 1; j < placed.length; j++) {
+                const k = key2(placed[i], placed[j]);
+                wideTopK[k] = (wideTopK[k] || 0) + 1;
+            }
+        }
+
+        if (order.length >= 2) {
+            const a = horseNumbers[order[0]];
+            const b = horseNumbers[order[1]];
+            umaren[key2(a, b)] = (umaren[key2(a, b)] || 0) + 1;
+            umatan[key2o(a, b)] = (umatan[key2o(a, b)] || 0) + 1;
+        }
+
+        if (order.length >= 3) {
+            const a = horseNumbers[order[0]];
+            const b = horseNumbers[order[1]];
+            const c = horseNumbers[order[2]];
+            sanrenpuku[key3(a, b, c)] = (sanrenpuku[key3(a, b, c)] || 0) + 1;
+            sanrentan[key3o(a, b, c)] = (sanrentan[key3o(a, b, c)] || 0) + 1;
+        }
+    }
+
+    for (const k of Object.keys(wideTopK)) wideTopK[k] /= iterations;
+    for (const k of Object.keys(umaren)) umaren[k] /= iterations;
+    for (const k of Object.keys(sanrenpuku)) sanrenpuku[k] /= iterations;
+    for (const k of Object.keys(umatan)) umatan[k] /= iterations;
+    for (const k of Object.keys(sanrentan)) sanrentan[k] /= iterations;
+
+    return { wideTopK, umaren, sanrenpuku, umatan, sanrentan };
+}
