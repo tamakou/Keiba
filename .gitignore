@@ -39,3 +39,12 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+
+# Keiba cache
+.keiba_cache/
+.keiba_backtest_cache/
+
+# Auto-generated dataset splits
+data/backtest_train.json
+data/backtest_holdout.json
+data/backtest_audit.json

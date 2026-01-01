@@ -49,11 +49,7 @@ function ece(probs: number[], labels: number[], bins = 10): number {
                 ys += labels[i];
             }
         }
-        if (cnt > 0) {
-            const ap = ps / cnt;
-            const ay = ys / cnt;
-            e += (cnt / n) * Math.abs(ap - ay);
-        }
+        if (cnt > 0) e += (cnt / n) * Math.abs(ps / cnt - ys / cnt);
     }
     return e;
 }
@@ -62,120 +58,106 @@ function clamp01(x: number): number {
     return Math.max(0, Math.min(1, x));
 }
 
-async function predictWinTop3Probs(raceId: string, system: System, rng: () => number, mcIters: number): Promise<{
-    win: Map<number, number>;
-    top3: Map<number, number>;
-    note: string;
-}> {
+async function predictWinTop3(raceId: string, system: System, seed: number, mcIters: number) {
     const race = await getRaceDetails(raceId, system);
     if (!race) throw new Error(`Race not found: ${raceId} (${system})`);
+    const rng = makeRng(seed ^ (parseInt(raceId.slice(-6), 10) || 0));
 
-    // 外部統計は backtest ではデフォルトOFF推奨（負荷対策）
-    const v2 = computeModelV2(race, {});
-
+    const base = computeModelV2(race, {}); // 外部統計はOFF（負荷対策）
     const useMixture = (process.env.KEIBA_BACKTEST_USE_PACE_MIXTURE ?? '1') === '1';
-    let note = `pace=${v2.paceIndex.toFixed(2)}`;
 
-    const horseNumbers = race.horses.map(h => h.number);
-
-    const mix = (a: number[], b: number[], c: number[], w: [number, number, number]) =>
-        a.map((_, i) => w[0] * a[i] + w[1] * b[i] + w[2] * c[i]);
-
-    let winP: number[] = [];
-    let top3P: number[] = [];
+    let winArr: number[] = [];
+    let top3Arr: number[] = [];
+    let note = `pace=${base.paceIndex.toFixed(2)}`;
 
     if (useMixture) {
-        const pace = v2.paceIndex;
+        const pace = base.paceIndex;
         const paceShift = Number(process.env.KEIBA_PACE_SHIFT || '') || 0.6;
         const scale = Number(process.env.KEIBA_PACE_SOFTMAX_SCALE || '') || 1.2;
         const normalBias = Number(process.env.KEIBA_PACE_NORMAL_BIAS || '') || 0.8;
         const w = softmax3(-scale * pace, normalBias, +scale * pace);
 
-        const slowW = computeModelV2(race, { paceOverride: Math.max(-1, pace - paceShift) });
-        const fastW = computeModelV2(race, { paceOverride: Math.min(+1, pace + paceShift) });
+        const slow = computeModelV2(race, { paceOverride: Math.max(-1, pace - paceShift) });
+        const fast = computeModelV2(race, { paceOverride: Math.min(+1, pace + paceShift) });
 
-        const slowF = estimateFinishProbs(slowW.probs, mcIters, rng);
-        const normF = estimateFinishProbs(v2.probs, mcIters, rng);
-        const fastF = estimateFinishProbs(fastW.probs, mcIters, rng);
+        const fSlow = estimateFinishProbs(slow.probs, mcIters, rng);
+        const fNorm = estimateFinishProbs(base.probs, mcIters, rng);
+        const fFast = estimateFinishProbs(fast.probs, mcIters, rng);
 
-        winP = mix(slowF.win, normF.win, fastF.win, w);
-        top3P = mix(slowF.top3, normF.top3, fastF.top3, w);
+        winArr = fSlow.win.map((_, i) => w[0] * fSlow.win[i] + w[1] * fNorm.win[i] + w[2] * fFast.win[i]);
+        top3Arr = fSlow.top3.map((_, i) => w[0] * fSlow.top3[i] + w[1] * fNorm.top3[i] + w[2] * fFast.top3[i]);
         note = `paceMix pSlow=${w[0].toFixed(2)} pN=${w[1].toFixed(2)} pF=${w[2].toFixed(2)} basePace=${pace.toFixed(2)}`;
     } else {
-        const f = estimateFinishProbs(v2.probs, mcIters, rng);
-        winP = f.win;
-        top3P = f.top3;
+        const f = estimateFinishProbs(base.probs, mcIters, rng);
+        winArr = f.win;
+        top3Arr = f.top3;
     }
 
-    const win = new Map<number, number>();
-    const top3 = new Map<number, number>();
-    horseNumbers.forEach((n, i) => {
-        win.set(n, clamp01(winP[i]));
-        top3.set(n, clamp01(top3P[i]));
-    });
-
-    return { win, top3, note };
+    const nums = race.horses.map(h => h.number);
+    return { race, nums, winArr: winArr.map(clamp01), top3Arr: top3Arr.map(clamp01), note };
 }
 
 async function main() {
     const file = arg('--data', path.join('data', 'backtest_races.json'))!;
-    const json = JSON.parse(fs.readFileSync(file, 'utf-8')) as RaceSpec[];
-    if (!Array.isArray(json) || json.length === 0) {
-        console.log(`No races in ${file}. Fill it with past race ids first.`);
-        process.exit(0);
-    }
-
     const seed = Number(arg('--seed', process.env.KEIBA_BACKTEST_SEED || '12345'));
     const mcIters = Number(arg('--mc', process.env.KEIBA_BACKTEST_MC_ITERATIONS || '8000'));
     const bins = Number(arg('--bins', process.env.KEIBA_ECE_BINS || '10'));
+
+    const specs = JSON.parse(fs.readFileSync(file, 'utf-8')) as RaceSpec[];
+    if (!Array.isArray(specs) || specs.length === 0) {
+        console.log(`No races in ${file}.`);
+        process.exit(0);
+    }
 
     let raceN = 0;
     let ll = 0;
     let top1 = 0;
     let winnerInPredTop3 = 0;
 
-    // 全馬サンプルで集計（頭数依存を排除）
     const winP: number[] = [];
     const winY: number[] = [];
     const top3P: number[] = [];
     const top3Y: number[] = [];
 
-    for (const r of json) {
+    for (const s of specs) {
+        const result = await fetchRaceResult(s.raceId, s.system);
+        if (!result || result.order.length === 0) {
+            console.log(`[SKIP] result parse failed ${s.system} ${s.raceId}`);
+            continue;
+        }
+        const winner = result.order[0];
+        const top3Set = new Set(result.top3);
+
         try {
-            const result = await fetchRaceResult(r.raceId, r.system);
-            if (!result || result.order.length === 0) {
-                console.log(`[SKIP] result parse failed ${r.system} ${r.raceId}`);
-                continue;
-            }
-            const winner = result.order[0];
-            const top3Set = new Set(result.top3);
+            const pred = await predictWinTop3(s.raceId, s.system, seed, mcIters);
+            const idx = pred.nums.findIndex(n => n === winner);
+            if (idx < 0) continue;
 
-            const rng = makeRng(seed ^ (parseInt(r.raceId.slice(-6), 10) || 0));
-            const pred = await predictWinTop3Probs(r.raceId, r.system, rng, mcIters);
-            const p = pred.win.get(winner) ?? 1e-12;
-            const pSafe = Math.max(1e-12, Math.min(1, p));
-
-            ll += -Math.log(pSafe);
+            const pWin = Math.max(1e-12, Math.min(1, pred.winArr[idx]));
+            ll += -Math.log(pWin);
             raceN += 1;
 
-            const best = [...pred.win.entries()].sort((a, b) => b[1] - a[1])[0]?.[0];
-            const predTop3 = [...pred.win.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(x => x[0]);
+            const best = pred.nums[pred.winArr.indexOf(Math.max(...pred.winArr))];
             if (best === winner) top1 += 1;
+
+            const predTop3 = pred.nums
+                .map((n, i) => ({ n, p: pred.winArr[i] }))
+                .sort((a, b) => b.p - a.p)
+                .slice(0, 3)
+                .map(x => x.n);
             if (predTop3.includes(winner)) winnerInPredTop3 += 1;
 
-            // 全馬サンプル集計（win / top3）
-            for (const [num, pw] of pred.win.entries()) {
-                winP.push(clamp01(pw));
-                winY.push(num === winner ? 1 : 0);
+            // 全馬で校正指標
+            pred.nums.forEach((n, i) => {
+                winP.push(pred.winArr[i]);
+                winY.push(n === winner ? 1 : 0);
+                top3P.push(pred.top3Arr[i]);
+                top3Y.push(top3Set.has(n) ? 1 : 0);
+            });
 
-                const pt = pred.top3.get(num) ?? 0;
-                top3P.push(clamp01(pt));
-                top3Y.push(top3Set.has(num) ? 1 : 0);
-            }
-
-            console.log(`[OK] ${r.system} ${r.raceId} win=${winner} pWin=${pSafe.toFixed(4)} predTop3=${predTop3.join(',')} note=${pred.note}`);
+            console.log(`[OK] ${s.system} ${s.raceId} win=${winner} pWin=${pWin.toFixed(4)} predTop3=${predTop3.join(',')} note=${pred.note}`);
         } catch (e) {
-            console.log(`[ERROR] ${r.system} ${r.raceId}: ${e}`);
+            console.log(`[ERROR] ${s.system} ${s.raceId}: ${e}`);
         }
     }
 
