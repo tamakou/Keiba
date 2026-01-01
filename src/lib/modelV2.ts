@@ -1,30 +1,28 @@
 // src/lib/modelV2.ts
-// 世界一級推定モデル v2
-// オッズ無しでも成立する実力推定（last5/馬場/距離/脚質/騎手統計）
+// Model v2: last5/馬場/距離/脚質/コース/外部統計を統合
 
 import { Race, Horse, HorseRun } from './types';
 import { normalizeBaba, parseRaceCourse, parseSurfaceDistance, Surface, Baba } from './courseParse';
-import { findCourseProfile, estimatePaceIndex, CourseProfile } from './courseProfiles';
+import { findCourseProfile, estimatePaceIndex } from './courseProfiles';
 import { PersonStats, canonicalDbUrl } from './externalStats';
+import { getModelWeights, ModelWeights } from './modelWeights';
 
 export interface ModelV2Options {
     jockeyStatsByUrl?: Map<string, PersonStats>;
     trainerStatsByUrl?: Map<string, PersonStats>;
-    paceOverride?: number | null; // Step2で使用
+    paceOverride?: number | null;              // Step2/Step3で使用
+    weightsOverride?: Partial<ModelWeights>;   // Step3最適化で使用
 }
 
-// ============================================================================
-// ユーティリティ
-// ============================================================================
+export interface ModelV2Result {
+    probs: number[];
+    factorStrings: string[][];
+    notes: string[];
+    paceIndex: number; // -1..+1
+}
 
 function clamp(x: number, lo: number, hi: number): number {
     return Math.max(lo, Math.min(hi, x));
-}
-
-function toNum(s: string | null): number | null {
-    if (!s) return null;
-    const n = parseInt(s, 10);
-    return Number.isFinite(n) ? n : null;
 }
 
 function median(nums: number[]): number | null {
@@ -34,25 +32,18 @@ function median(nums: number[]): number | null {
     return a.length % 2 ? a[mid] : (a[mid - 1] + a[mid]) / 2;
 }
 
-// ============================================================================
-// 特徴量計算
-// ============================================================================
+function toNum(s: string | null): number | null {
+    if (!s) return null;
+    const n = parseInt(s, 10);
+    return Number.isFinite(n) ? n : null;
+}
 
-type RunningStyle = 'Front' | 'Stalker' | 'Mid' | 'Closer' | 'Unknown';
-
-/**
- * 通過順から脚質を推定
- * Front: 平均先頭3位以内
- * Stalker: 4-6位
- * Mid: 7-10位
- * Closer: 11位以降
- */
-function inferStyleFromRuns(runs: HorseRun[] | null): { style: RunningStyle; avgPos: number | null } {
+function inferStyleFromRuns(runs: HorseRun[] | null): { style: 'Front' | 'Stalker' | 'Mid' | 'Closer' | 'Unknown'; avgPos: number | null } {
     if (!runs || runs.length === 0) return { style: 'Unknown', avgPos: null };
     const pos: number[] = [];
     for (const r of runs) {
-        if (!r.passing) continue;
-        const m = r.passing.match(/^(\d{1,2})/);
+        const ptxt = r.passing || '';
+        const m = ptxt.match(/^(\d{1,2})/);
         if (!m) continue;
         const p = parseInt(m[1], 10);
         if (Number.isFinite(p)) pos.push(p);
@@ -65,10 +56,6 @@ function inferStyleFromRuns(runs: HorseRun[] | null): { style: RunningStyle; avg
     return { style: 'Closer', avgPos: avg };
 }
 
-/**
- * フォーム指数：直近ほど重みを大きく、着順が良いほど高い
- * 返り値: 0.05〜1.0
- */
 function formIndex(runs: HorseRun[] | null): number | null {
     if (!runs || runs.length === 0) return null;
     const w = [1.0, 0.85, 0.7, 0.55, 0.4];
@@ -76,47 +63,48 @@ function formIndex(runs: HorseRun[] | null): number | null {
     for (let i = 0; i < Math.min(runs.length, 5); i++) {
         const f = toNum(runs[i].finish);
         if (f == null) continue;
-        // finish=1 => 1.0、finish=10 => 0.1
         const v = clamp(1 / f, 0.05, 1.0);
         sum += v * w[i];
         sw += w[i];
     }
     if (sw === 0) return null;
-    return sum / sw;
+    return sum / sw; // 0.05..1.0
 }
 
-/**
- * 距離適性指数：今日の距離と近走距離の一致度
- * 返り値: 0.0〜1.0
- */
+function last3fMedian(runs: HorseRun[] | null): number | null {
+    if (!runs || runs.length === 0) return null;
+    const vals: number[] = [];
+    for (const r of runs) {
+        const s = r.last3f;
+        if (!s) continue;
+        const x = parseFloat(s);
+        if (Number.isFinite(x)) vals.push(x);
+    }
+    return median(vals); // 小さいほど良い
+}
+
 function distMatchIndex(runs: HorseRun[] | null, todaySurface: Surface, todayDist: number | null): number | null {
     if (!runs || runs.length === 0 || todayDist == null) return null;
     let best = -999;
     for (const r of runs) {
-        const { surface, distance: dist } = parseSurfaceDistance(r.surfaceDistance);
-        if (dist == null) continue;
-        // 距離差 0 => 1.0、800m差 => 0.0
-        const dm = 1 - Math.min(1, Math.abs(dist - todayDist) / 800);
-        const sm = surface === todaySurface ? 1.0 : 0.6; // surface違いは大きく減点
+        const { surface, distance } = parseSurfaceDistance(r.surfaceDistance);
+        if (distance == null) continue;
+        const dm = 1 - Math.min(1, Math.abs(distance - todayDist) / 800);
+        const sm = surface === todaySurface ? 1.0 : 0.6;
         best = Math.max(best, dm * sm);
     }
     return best === -999 ? null : best;
 }
 
-/**
- * 馬場適性指数：重/不での好走実績
- * 返り値: 0.05〜1.0（該当なしはnull）
- */
 function goingAffinityIndex(runs: HorseRun[] | null, todayBaba: Baba): number | null {
-    if (!runs || runs.length === 0 || todayBaba === '不明') return null;
-    // 今日が重/不のときのみ、重/不でのフォームを評価
-    if (todayBaba !== '重' && todayBaba !== '不') return null;
+    if (!runs || runs.length === 0) return null;
+    if (!(todayBaba === '重' || todayBaba === '不')) return null;
 
     const w = [1.0, 0.85, 0.7, 0.55, 0.4];
     let sum = 0, sw = 0;
     for (let i = 0; i < Math.min(runs.length, 5); i++) {
-        const b = normalizeBaba(runs[i].baba);
-        if (b !== '重' && b !== '不') continue;
+        const b = (runs[i].baba || '').trim();
+        if (!(b.includes('重') || b.includes('不'))) continue;
         const f = toNum(runs[i].finish);
         if (f == null) continue;
         const v = clamp(1 / f, 0.05, 1.0);
@@ -127,61 +115,55 @@ function goingAffinityIndex(runs: HorseRun[] | null, todayBaba: Baba): number | 
     return sum / sw;
 }
 
-/**
- * 上がり中央値（last3f）
- * 小さいほど良い
- */
-function last3fMedian(runs: HorseRun[] | null): number | null {
-    if (!runs || runs.length === 0) return null;
-    const vals: number[] = [];
-    for (const r of runs) {
-        if (!r.last3f) continue;
-        const x = parseFloat(r.last3f);
-        if (Number.isFinite(x)) vals.push(x);
-    }
-    return median(vals);
-}
-
-// ============================================================================
-// メイン推定関数
-// ============================================================================
-
-export interface ModelV2Result {
-    probs: number[];           // 各馬の勝率推定
-    factorStrings: string[][]; // 各馬の主要因（表示用）
-    notes: string[];           // デバッグ/メモ
-    paceIndex: number;         // ペース指数 (-1..+1)
-}
-
 export function computeModelV2(race: Race, opts: ModelV2Options = {}): ModelV2Result {
+    const W = getModelWeights(opts.weightsOverride);
     const horses = race.horses;
     const notes: string[] = [];
 
-    // コース情報パース
     const { surface, distance, direction } = parseRaceCourse(race.course);
     const todayBaba = normalizeBaba(race.baba);
     notes.push(`ModelV2: ${surface}${distance ?? '??'}m ${direction} baba=${todayBaba} weather=${race.weather}`);
 
-    // 各馬の特徴量
-    const perHorse = horses.map(h => ({
-        fi: formIndex(h.last5),
-        l3: last3fMedian(h.last5),
-        dm: distMatchIndex(h.last5, surface, distance),
-        ga: goingAffinityIndex(h.last5, todayBaba),
-        style: inferStyleFromRuns(h.last5),
-    }));
+    // per-horse base features
+    const perHorse = horses.map(h => {
+        const fi = formIndex(h.last5);
+        const l3 = last3fMedian(h.last5);
+        const dm = distMatchIndex(h.last5, surface, distance);
+        const ga = goingAffinityIndex(h.last5, todayBaba);
+        const st = inferStyleFromRuns(h.last5);
+        return { fi, l3, dm, ga, style: st };
+    });
 
-    // フィールド中央値（上がり比較用）
+    // field median last3f
     const l3All = perHorse.map(x => x.l3).filter((x): x is number => x != null);
     const l3Med = median(l3All);
 
-    // 騎手/調教師の統計代理（レース内の担当馬フォーム平均）
+    // course profile + pace
+    const courseProfile = findCourseProfile({ venue: race.venue, surface, distance, direction });
+    if (courseProfile) {
+        notes.push(`コースプロファイル: ${courseProfile.venue} ${courseProfile.surface}${courseProfile.distance}m 内bias=${courseProfile.insideBias} 前bias=${courseProfile.frontBias}`);
+    } else {
+        notes.push('コースプロファイル: 該当データなし（デフォルトバイアス使用）');
+    }
+
+    const styleDist = { front: 0, stalker: 0, mid: 0, closer: 0 };
+    perHorse.forEach(h => {
+        const s = h.style.style;
+        if (s === 'Front') styleDist.front++;
+        else if (s === 'Stalker') styleDist.stalker++;
+        else if (s === 'Mid') styleDist.mid++;
+        else if (s === 'Closer') styleDist.closer++;
+    });
+
+    const paceRaw = clamp(estimatePaceIndex(styleDist), -1, 1);
+    const paceIndex = (opts.paceOverride != null) ? clamp(opts.paceOverride, -1, 1) : paceRaw;
+    notes.push(`ペース推定: ${paceIndex.toFixed(2)} (前${styleDist.front}/先${styleDist.stalker}/中${styleDist.mid}/差${styleDist.closer})`);
+
+    // jockey/trainer proxy mean (fallback)
     const overallFi = perHorse.map(x => x.fi).filter((x): x is number => x != null);
     const overallFiMean = overallFi.length ? overallFi.reduce((a, b) => a + b, 0) / overallFi.length : null;
-
     const jAgg = new Map<string, { sum: number; n: number }>();
     const tAgg = new Map<string, { sum: number; n: number }>();
-
     horses.forEach((h, i) => {
         const fi = perHorse[i].fi;
         if (fi == null) return;
@@ -196,38 +178,14 @@ export function computeModelV2(race: Race, opts: ModelV2Options = {}): ModelV2Re
             tAgg.set(h.trainer, cur);
         }
     });
-
     const jockeyMean = new Map<string, number>();
     const trainerMean = new Map<string, number>();
     for (const [k, v] of jAgg.entries()) jockeyMean.set(k, v.sum / v.n);
     for (const [k, v] of tAgg.entries()) trainerMean.set(k, v.sum / v.n);
 
-    // コースプロファイル検索
-    const courseProfile = findCourseProfile({ venue: race.venue, surface, distance, direction });
-    if (courseProfile) {
-        notes.push(`コースプロファイル: ${courseProfile.venue} ${courseProfile.surface}${courseProfile.distance}m 内bias=${courseProfile.insideBias} 前bias=${courseProfile.frontBias}`);
-    } else {
-        notes.push('コースプロファイル: 該当データなし（デフォルトバイアス使用）');
-    }
-
-    // ペース推定（脚質分布から）
-    const styleDistribution = { front: 0, stalker: 0, mid: 0, closer: 0 };
-    perHorse.forEach(h => {
-        const s = h.style.style;
-        if (s === 'Front') styleDistribution.front++;
-        else if (s === 'Stalker') styleDistribution.stalker++;
-        else if (s === 'Mid') styleDistribution.mid++;
-        else if (s === 'Closer') styleDistribution.closer++;
-    });
-    const paceIndexRaw = clamp(estimatePaceIndex(styleDistribution), -1, 1);
-    const paceIndex = (opts.paceOverride != null) ? clamp(opts.paceOverride, -1, 1) : paceIndexRaw;
-    notes.push(`ペース推定: ${paceIndex.toFixed(2)} (前${styleDistribution.front}/先${styleDistribution.stalker}/中${styleDistribution.mid}/差${styleDistribution.closer})${opts.paceOverride != null ? ' [override]' : ''}`);;
-
-    // 距離×脚質バイアス
     const isSprint = distance != null && distance <= 1400;
     const isLong = distance != null && distance >= 2000;
 
-    // スコア計算
     const rawScores: number[] = [];
     const factorStrings: string[][] = [];
 
@@ -235,48 +193,43 @@ export function computeModelV2(race: Race, opts: ModelV2Options = {}): ModelV2Re
         const factors: { label: string; delta: number }[] = [];
         let logS = 0;
 
-        // 1) 枚（内外）+ コースバイアス
+        // 1) 枠 + insideBias
         if (h.gate > 0) {
-            const insideBias = courseProfile?.insideBias ?? 0.1; // デフォルトは軽い内有利
             const inside = h.gate <= 2;
             const outside = h.gate >= 7 && horses.length > 10;
+            const insideBias = (courseProfile?.insideBias ?? 0.1) * W.insideBiasScale;
             if (inside) {
                 const d = 0.03 + insideBias * 0.05;
                 logS += d;
-                factors.push({ label: '内枚', delta: d });
+                factors.push({ label: '内枠', delta: d });
             }
             if (outside) {
                 const d = -0.02 - insideBias * 0.03;
                 logS += d;
-                factors.push({ label: '外枚', delta: d });
+                factors.push({ label: '外枠', delta: d });
             }
         }
 
-        // 2) 馬体増減
+        // 2) 馬体増減（既存の軽い扱い）
         if (h.weightChange != null) {
-            if (Math.abs(h.weightChange) <= 2) {
-                logS += 0.02;
-                factors.push({ label: '馬体安定', delta: +0.02 });
-            } else if (Math.abs(h.weightChange) >= 10) {
-                logS -= 0.08;
-                factors.push({ label: '馬体増減大', delta: -0.08 });
-            }
+            if (Math.abs(h.weightChange) <= 2) { logS += 0.02; factors.push({ label: '馬体安定', delta: +0.02 }); }
+            else if (Math.abs(h.weightChange) >= 10) { logS -= 0.08; factors.push({ label: '馬体増減大', delta: -0.08 }); }
         }
 
-        // 3) フォーム（近走）
+        // 3) 近走フォーム
         const fi = perHorse[i].fi;
         if (fi != null) {
             const x = clamp((fi - 0.25) / 0.25, -1, +1);
-            const d = 0.22 * x;
+            const d = W.form * x;
             logS += d;
             factors.push({ label: '近走フォーム', delta: d });
         }
 
-        // 4) 上がり性能
+        // 4) 上がり
         const l3 = perHorse[i].l3;
         if (l3 != null && l3Med != null) {
             const z = clamp((l3Med - l3) / 0.8, -1, +1);
-            const d = 0.18 * z;
+            const d = W.last3f * z;
             logS += d;
             factors.push({ label: '上がり性能', delta: d });
         }
@@ -284,103 +237,87 @@ export function computeModelV2(race: Race, opts: ModelV2Options = {}): ModelV2Re
         // 5) 距離適性
         const dm = perHorse[i].dm;
         if (dm != null) {
-            const d = 0.14 * clamp((dm - 0.6) / 0.4, -1, +1);
+            const d = W.dist * clamp((dm - 0.6) / 0.4, -1, +1);
             logS += d;
             factors.push({ label: '距離適性', delta: d });
         }
 
-        // 6) 馬場適性（重/不の時のみ）
+        // 6) 重不適性
         const ga = perHorse[i].ga;
         if (ga != null) {
             const x = clamp((ga - 0.25) / 0.25, -1, +1);
-            const d = 0.12 * x;
+            const d = W.going * x;
             logS += d;
-            factors.push({ label: '重馬場適性', delta: d });
+            factors.push({ label: '重不適性', delta: d });
         }
 
-        // 7) 脚質×距離バイアス + コースfrontBias + ペース
+        // 7) 脚質×距離×コース×ペース
         const st = perHorse[i].style.style;
-        const frontBias = courseProfile?.frontBias ?? 0;
-        // ベース効果
         let styleD = 0;
-        if (isSprint) {
-            styleD = st === 'Front' ? +0.08 : st === 'Stalker' ? +0.03 : st === 'Closer' ? -0.05 : 0;
-        } else if (isLong) {
-            styleD = st === 'Closer' ? +0.05 : st === 'Front' ? -0.03 : 0;
-        }
-        // コースfrontBias上乗せ
-        if (st === 'Front' || st === 'Stalker') {
-            styleD += frontBias * 0.06;
-        } else if (st === 'Mid' || st === 'Closer') {
-            styleD -= frontBias * 0.04;
-        }
-        // ペース上乗せ（ハイペースなら差し有利）
-        if (st === 'Closer') {
-            styleD += paceIndex * 0.05;
-        } else if (st === 'Front') {
-            styleD -= paceIndex * 0.04;
-        }
+        if (isSprint) styleD = (st === 'Front' ? +0.08 : st === 'Stalker' ? +0.03 : st === 'Closer' ? -0.05 : 0);
+        else if (isLong) styleD = (st === 'Closer' ? +0.05 : st === 'Front' ? -0.03 : 0);
+
+        const frontBias = (courseProfile?.frontBias ?? 0) * W.frontBiasScale;
+        if (st === 'Front' || st === 'Stalker') styleD += frontBias * 0.06;
+        if (st === 'Mid' || st === 'Closer') styleD -= frontBias * 0.04;
+
+        const paceEff = paceIndex * W.paceScale;
+        if (st === 'Closer') styleD += paceEff * 0.05;
+        if (st === 'Front') styleD -= paceEff * 0.04;
+
+        styleD *= W.styleScale;
         if (styleD !== 0) {
             logS += styleD;
             factors.push({ label: '脚質×コース', delta: styleD });
         }
 
-        // 8) 騎手（外部統計→proxy）
+        // 8) 騎手（外部→proxy）
         const jUrl = h.jockeyUrl ? canonicalDbUrl(h.jockeyUrl, 'jockey') : null;
         const jStat = (jUrl && opts.jockeyStatsByUrl) ? opts.jockeyStatsByUrl.get(jUrl) : null;
         if (jStat?.placeRate != null) {
-            // placeRateを使用（安定）。平均0.25を基準
             const rel = clamp((jStat.placeRate - 0.25) / 0.08, -1, +1);
-            const d = 0.06 * rel;
+            const d = W.jockey * rel;
             logS += d;
             factors.push({ label: '騎手(外部)', delta: d });
         } else if (overallFiMean != null && h.jockey && h.jockey !== '取得不可') {
             const jm = jockeyMean.get(h.jockey);
             if (jm != null) {
                 const rel = clamp((jm - overallFiMean) / 0.15, -1, +1);
-                const d = 0.06 * rel;
+                const d = W.jockey * rel;
                 logS += d;
                 factors.push({ label: '騎手(proxy)', delta: d });
             }
         }
 
-        // 9) 調教師（外部統計→proxy）
+        // 9) 調教師（外部→proxy）
         const tUrl = h.trainerUrl ? canonicalDbUrl(h.trainerUrl, 'trainer') : null;
         const tStat = (tUrl && opts.trainerStatsByUrl) ? opts.trainerStatsByUrl.get(tUrl) : null;
         if (tStat?.placeRate != null) {
             const rel = clamp((tStat.placeRate - 0.25) / 0.08, -1, +1);
-            const d = 0.05 * rel;
+            const d = W.trainer * rel;
             logS += d;
             factors.push({ label: '調教師(外部)', delta: d });
         } else if (overallFiMean != null && h.trainer && h.trainer !== '取得不可') {
             const tm = trainerMean.get(h.trainer);
             if (tm != null) {
                 const rel = clamp((tm - overallFiMean) / 0.15, -1, +1);
-                const d = 0.05 * rel;
+                const d = W.trainer * rel;
                 logS += d;
                 factors.push({ label: '調教師(proxy)', delta: d });
             }
         }
 
-        // スコア（exp で正の値に）
         const score = Math.exp(logS);
         rawScores.push(score);
 
-        // 主要因（寄与が大きい順に3つ）
-        const top = [...factors]
-            .sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta))
-            .slice(0, 3);
-
-        const strs = top.length
-            ? top.map(f => `${f.label}${f.delta >= 0 ? '+' : ''}${f.delta.toFixed(2)}`)
-            : ['情報不足'];
-
-        factorStrings.push(strs);
+        const top = [...factors].sort((a, b) => Math.abs(b.delta) - Math.abs(a.delta)).slice(0, 3);
+        factorStrings.push(top.length ? top.map(f => `${f.label}${f.delta >= 0 ? '+' : ''}${f.delta.toFixed(2)}`) : ['情報不足']);
     });
 
-    // 正規化 → 確率
     const sum = rawScores.reduce((a, b) => a + b, 0);
     const probs = sum > 0 ? rawScores.map(s => s / sum) : rawScores.map(() => 1 / rawScores.length);
+
+    notes.push(`Weights: form=${W.form} last3f=${W.last3f} dist=${W.dist} going=${W.going} styleScale=${W.styleScale} jockey=${W.jockey} trainer=${W.trainer}`);
 
     return { probs, factorStrings, notes, paceIndex };
 }

@@ -1,0 +1,15 @@
+{
+    "version": 1,
+    "weights": {
+        "form": 0.22,
+        "last3f": 0.18,
+        "dist": 0.14,
+        "going": 0.12,
+        "styleScale": 1.0,
+        "jockey": 0.06,
+        "trainer": 0.05,
+        "insideBiasScale": 1.0,
+        "frontBiasScale": 1.0,
+        "paceScale": 1.0
+    }
+}
