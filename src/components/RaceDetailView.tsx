@@ -3,46 +3,38 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { Race, Horse } from '@/lib/types';
 import RaceAnimation3D from './RaceAnimation3D';
+import { sampleOrderPlackettLuce } from '@/lib/simulator';
 
 export default function RaceDetailView({ race }: { race: Race }) {
-    const [simResult, setSimResult] = useState<Horse | null>(null);
+    const [simOrder, setSimOrder] = useState<Horse[] | null>(null);
     const [isSimulating, setIsSimulating] = useState(false);
 
     const startSimulation = () => {
-        const simScores: { horse: Horse; score: number }[] = race.horses.map(h => {
+        // weights（相対値でOK：正規化不要）
+        const weights = race.horses.map(h => {
             let score = h.estimatedProb;
+
             const conditionFactor = 0.8 + Math.random() * 0.4;
             score *= conditionFactor;
 
             const odds = h.odds ?? 0;
             if (odds > 20) {
-                const upsetBonus = Math.random() * Math.random() * 0.3;
-                score += upsetBonus;
+                score += Math.random() * Math.random() * 0.3;
             } else if (odds > 10) {
-                const upsetBonus = Math.random() * Math.random() * 0.15;
-                score += upsetBonus;
+                score += Math.random() * Math.random() * 0.15;
             }
 
             score += (Math.random() - 0.5) * 0.1;
-            return { horse: h, score: Math.max(0.001, score) };
+            return Math.max(0.001, score);
         });
 
-        const totalScore = simScores.reduce((sum, s) => sum + s.score, 0);
-        simScores.forEach(s => s.score = s.score / totalScore);
+        // ✅ Plackett–Luce で「着順（index配列）」をサンプル
+        const orderIdx = sampleOrderPlackettLuce(weights, Math.random);
 
-        const r = Math.random();
-        let cumulative = 0;
-        let winner = race.horses[0];
+        // ✅ Horse配列（1着→最下位）
+        const finishOrder = orderIdx.map(i => race.horses[i]);
 
-        for (const { horse, score } of simScores) {
-            cumulative += score;
-            if (r <= cumulative) {
-                winner = horse;
-                break;
-            }
-        }
-
-        setSimResult(winner);
+        setSimOrder(finishOrder);
         setIsSimulating(true);
     };
 
@@ -317,7 +309,7 @@ export default function RaceDetailView({ race }: { race: Race }) {
             </div>
 
             {/* Animation Overlay */}
-            {isSimulating && simResult && (
+            {isSimulating && simOrder && (
                 <div className="modal-overlay" style={{
                     background: 'rgba(0,0,0,0.95)',
                     position: 'fixed',
@@ -329,13 +321,16 @@ export default function RaceDetailView({ race }: { race: Race }) {
                     justifyContent: 'center',
                     padding: '20px'
                 }}>
-                    <h2 style={{ color: '#fff', marginBottom: '10px', textAlign: 'center' }}>レース進行（3Dシミュレーション）</h2>
+                    <h2 style={{ color: '#fff', marginBottom: '10px', textAlign: 'center' }}>
+                        レース進行（3Dシミュレーション）
+                    </h2>
+
                     <RaceAnimation3D
                         horses={race.horses}
-                        winner={simResult}
+                        finishOrder={simOrder}
                         courseStr={race.course}
-                        onClose={() => setIsSimulating(false)}
-                        onFinish={() => setIsSimulating(false)}
+                        onClose={() => { setIsSimulating(false); setSimOrder(null); }}
+                        onFinish={() => { setIsSimulating(false); setSimOrder(null); }}
                     />
                 </div>
             )}

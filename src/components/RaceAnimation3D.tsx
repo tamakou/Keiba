@@ -4,10 +4,10 @@ import { Horse } from '@/lib/types';
 
 interface RaceAnimationProps {
     horses: Horse[];
-    winner: Horse;
+    finishOrder: Horse[]; // 1着→最下位（Plackett–Luceでサンプルした着順）
     courseStr: string;
     onFinish: () => void;
-    onClose?: () => void;
+    onClose?: () => void; // 互換用（現状未使用）
 }
 
 interface RunnerState {
@@ -15,16 +15,21 @@ interface RunnerState {
     dist: number;
     lane: number;
     color: string;
-    finishOrderFactor: number;
+
+    finishRank: number;   // 0=1着
+    finishTimeMs: number; // 走り出してからゴールするまでの時間(ms)
+    style: number;        // -1..+1（前傾=マイナス / 差し=プラス）
+
     finished: boolean;
 }
 
-export default function RaceAnimation3D({ horses, winner, courseStr, onFinish, onClose }: RaceAnimationProps) {
+export default function RaceAnimation3D({ horses, finishOrder, courseStr, onFinish, onClose }: RaceAnimationProps) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const requestRef = useRef<number | null>(null);
+
     const runnersRef = useRef<RunnerState[]>([]);
-    const rankingsRef = useRef<Horse[]>([]);
+    const finishOrderRef = useRef<Horse[]>([]);
 
     const [showStart, setShowStart] = useState(true);
     const [rankings, setRankings] = useState<Horse[]>([]);
@@ -36,10 +41,17 @@ export default function RaceAnimation3D({ horses, winner, courseStr, onFinish, o
         const ctx = canvas.getContext('2d');
         if (!ctx) return;
 
+        if (!horses || horses.length === 0) return;
+
+        // Reset UI state
+        setShowStart(true);
+        setRankings([]);
+        setRaceEnded(false);
+
         // Track Config
         let totalDistance = 1600;
         const distMatch = courseStr.match(/([0-9]+)m/);
-        if (distMatch) totalDistance = parseInt(distMatch[1]);
+        if (distMatch) totalDistance = parseInt(distMatch[1], 10);
 
         // Track geometry in world coordinates
         const trackWidth = 300;
@@ -90,74 +102,151 @@ export default function RaceAnimation3D({ horses, winner, courseStr, onFinish, o
         // 3D to 2D Projection (Perspective)
         // Camera positioned more overhead to see entire track
         const camX = 0;
-        const camY = 300; // Higher for more overhead view
-        const camZ = 250; // Further back
-        const fov = 450; // Balanced FOV
+        const camY = 300;
+        const camZ = 250;
+        const fov = 450;
 
         const project3D = (x: number, y: number, z: number, W: number, H: number) => {
-            // Translate relative to camera
             const dx = x - camX;
             const dy = y - camY;
             const dz = z - camZ;
 
-            // Simple perspective (camera looks toward origin)
-            const depth = -dz; // Positive depth = further from camera
+            const depth = -dz;
             if (depth <= 10) return null;
 
             const scale = fov / depth;
             return {
                 x: W / 2 + dx * scale,
-                y: H / 3 - dy * scale, // Position track in upper third
+                y: H / 3 - dy * scale,
                 scale: scale,
                 depth: depth
             };
         };
 
+        // ---------------------------
+        // ✅ Finish order: 1着→最下位
+        // ---------------------------
+        finishOrderRef.current =
+            (finishOrder && finishOrder.length === horses.length) ? finishOrder.slice() : horses.slice();
+
+        const rankByNo = new Map<number, number>();
+        finishOrderRef.current.forEach((h, idx) => rankByNo.set(h.number, idx));
+
+        // ---------------------------
+        // ✅ Generate per-rank finish times (monotonic)
+        // ---------------------------
+        const n = horses.length;
+        const finishTimeByRank: number[] = [];
+
+        // 走り出してから勝ち馬がゴールするまで（ms）
+        let t = 17500 + Math.random() * 800; // 17.5〜18.3秒くらい
+
+        for (let r = 0; r < n; r++) {
+            finishTimeByRank[r] = t;
+            t += 180 + Math.random() * 220; // 着差っぽいズレ（0.18〜0.40秒）
+        }
+
+        const maxFinishMs = finishTimeByRank[n - 1] ?? 19000;
+
+        // ---------------------------
+        // ✅ Pace curve (style) → overtakes happen naturally
+        // ---------------------------
+        const clamp01 = (x: number) => Math.max(0, Math.min(1, x));
+        const clamp11 = (x: number) => Math.max(-1, Math.min(1, x));
+
+        // style: -1..+1
+        //   -1: 逃げ/先行（前半速い→後半伸びない）
+        //   +1: 差し/追込（前半遅い→後半伸びる）
+        const progressCurve = (u: number, style: number) => {
+            const s = clamp11(style);
+            if (s >= 0) {
+                const exp = 1 + s * 1.6;  // 1..2.6（後半伸び型）
+                return Math.pow(u, exp);
+            }
+            const exp = 1 + (-s) * 1.6; // 1..2.6（前半速い型）
+            return 1 - Math.pow(1 - u, exp);
+        };
+
         // Init Runners
         const wakuColors = ['#fff', '#333', '#c9242b', '#1e7eb6', '#d6c526', '#2a9235', '#d4590f', '#d985a8'];
-        runnersRef.current = horses.map((h) => ({
-            horse: h,
-            dist: 0,
-            lane: h.gate - 1,
-            color: wakuColors[(h.gate - 1) % 8] || '#888',
-            finishOrderFactor: h.number === winner.number ? 1.08 : (0.92 + Math.random() * 0.12),
-            finished: false
-        }));
-        rankingsRef.current = [];
 
+        runnersRef.current = horses.map((h) => {
+            const rank = rankByNo.get(h.number);
+            const safeRank = (rank != null && rank >= 0 && rank < n) ? rank : (n - 1);
+            const finishTimeMs = finishTimeByRank[safeRank] ?? maxFinishMs;
+
+            // ランダム脚質 + ほんの少しだけ上位ほど差し寄りにバイアス（※好みで消してOK）
+            const base = Math.random() * 2 - 1; // -1..+1
+            const bias = ((n - 1 - safeRank) / Math.max(1, n - 1) - 0.5) * 0.30; // -0.15..+0.15
+            const style = clamp11(base * 0.85 + bias);
+
+            return {
+                horse: h,
+                dist: 0,
+                lane: h.gate - 1,
+                color: wakuColors[(h.gate - 1) % 8] || '#888',
+                finishRank: safeRank,
+                finishTimeMs,
+                style,
+                finished: false
+            };
+        });
+
+        // ---------------------------
+        // ✅ Main loop
+        // ---------------------------
         let startTime = performance.now();
-        const duration = 22000;
-        const speedScale = totalDistance / (duration / 16.6);
+        const startDelayMs = 2000;
+        let startOverlayActive = true;
+
         let allFinished = false;
+        let lastUiUpdate = 0;
+        const uiUpdateIntervalMs = 250;
+
+        // after finished, keep drawing a bit (not strictly needed, but fine)
+        const stopAfterMs = startDelayMs + maxFinishMs + 6000;
 
         const loop = (time: number) => {
             const elapsed = time - startTime;
 
-            if (elapsed > 2000 && showStart) {
+            if (elapsed > startDelayMs && startOverlayActive) {
+                startOverlayActive = false;
                 setShowStart(false);
             }
 
-            // Physics
-            if (elapsed >= 2000 && !allFinished) {
+            const raceMs = elapsed - startDelayMs;
+
+            // Physics (actually: time-curve mapping)
+            if (raceMs >= 0 && !allFinished) {
                 runnersRef.current.forEach(r => {
                     if (r.finished) return;
-                    let s = speedScale * r.finishOrderFactor;
-                    s += Math.sin(elapsed * 0.008 + r.lane * 0.5) * 0.15;
-                    if (r.dist > totalDistance * 0.85 && r.horse.number === winner.number) s *= 1.08;
-                    r.dist = Math.min(r.dist + s, totalDistance);
 
-                    if (r.dist >= totalDistance && !r.finished) {
+                    if (raceMs >= r.finishTimeMs) {
+                        r.dist = totalDistance;
                         r.finished = true;
-                        rankingsRef.current.push(r.horse);
-                        setRankings([...rankingsRef.current]);
+                    } else {
+                        const u = clamp01(raceMs / r.finishTimeMs);
+                        const frac = progressCurve(u, r.style);
+                        const targetDist = frac * totalDistance;
+                        r.dist = Math.max(r.dist, targetDist);
                     }
                 });
 
-                if (runnersRef.current.every(r => r.finished)) {
+                // LIVE ranking（スロットルしてReact更新頻度を抑える）
+                if (time - lastUiUpdate >= uiUpdateIntervalMs) {
+                    const live = [...runnersRef.current]
+                        .slice()
+                        .sort((a, b) => b.dist - a.dist)
+                        .map(x => x.horse);
+                    setRankings(live);
+                    lastUiUpdate = time;
+                }
+
+                if (raceMs >= maxFinishMs) {
                     allFinished = true;
+                    // 最終結果は「サンプルした着順」に固定
+                    setRankings([...finishOrderRef.current]);
                     setRaceEnded(true);
-                    // Disable auto-close to show results
-                    // setTimeout(onFinish, 3000); 
                 }
             }
 
@@ -178,7 +267,6 @@ export default function RaceAnimation3D({ horses, winner, courseStr, onFinish, o
             ctx.fillRect(0, 0, W, H);
 
             // Draw Track Surface (3D)
-            // Draw filled track as a series of quads
             ctx.fillStyle = '#8B4513';
             ctx.strokeStyle = '#fff';
             ctx.lineWidth = 2;
@@ -279,7 +367,7 @@ export default function RaceAnimation3D({ horses, winner, courseStr, onFinish, o
                 }
             });
 
-            if (!allFinished || elapsed < startTime + duration + 5000) {
+            if (!allFinished || elapsed < stopAfterMs) {
                 requestRef.current = requestAnimationFrame(loop);
             }
         };
@@ -289,7 +377,7 @@ export default function RaceAnimation3D({ horses, winner, courseStr, onFinish, o
         return () => {
             if (requestRef.current) cancelAnimationFrame(requestRef.current);
         };
-    }, [horses, winner, courseStr, onFinish, showStart]);
+    }, [horses, finishOrder, courseStr]);
 
     return (
         <div ref={containerRef} style={{
