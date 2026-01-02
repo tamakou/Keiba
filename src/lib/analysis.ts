@@ -9,6 +9,7 @@ import {
     FinishProbs,
     BetEventProbs
 } from './simulator';
+import { loadCalibration, applyTemperature, applyPlatt } from './calibration';
 import { buildOptimizedPortfolios, OptimizeSettings } from './optimizer';
 import { computeModelV2, ModelV2Options } from './modelV2';
 import { fetchJockeyStats, fetchTrainerStats, PersonStats, canonicalDbUrl } from './externalStats';
@@ -25,6 +26,7 @@ export interface AnalyzeOptions {
 const sortByProb = (horses: Horse[]) => [...horses].sort((a, b) => b.estimatedProb - a.estimatedProb);
 const sortByEv = (horses: Horse[]) => [...horses].sort((a, b) => (b.ev ?? -999) - (a.ev ?? -999));
 const sortByUpset = (horses: Horse[]) => [...horses].sort((a, b) => (b.upsetIndex ?? 0) - (a.upsetIndex ?? 0));
+
 
 function topKForPlace(n: number): number {
     if (n <= 4) return 1;
@@ -157,6 +159,14 @@ export async function analyzeRace(race: Race, opts: AnalyzeOptions = {}): Promis
     const horses = race.horses;
     const notes: string[] = [];
 
+    const enableCalibration = process.env.KEIBA_ENABLE_CALIBRATION !== '0'; // デフォルトON
+    const calib = enableCalibration ? loadCalibration() : null;
+    if (enableCalibration && calib) {
+        notes.push(
+            `Calibration: winTemp=${calib.winTemperature.toFixed(3)} top2Platt(a=${calib.top2Platt.a.toFixed(2)},b=${calib.top2Platt.b.toFixed(2)}) top3Platt(a=${calib.top3Platt.a.toFixed(2)},b=${calib.top3Platt.b.toFixed(2)})`
+        );
+    }
+
     // オッズテーブルの状態を notes に出す（「取得成功だが空」切り分け）
     const checkTypes: BetType[] = ['複勝', 'ワイド', '馬連', '三連複', '三連単', '馬単'];
     for (const t of checkTypes) {
@@ -271,17 +281,30 @@ export async function analyzeRace(race: Race, opts: AnalyzeOptions = {}): Promis
         const v2Slow = computeModelV2(race, { ...v2Opts, paceOverride: Math.max(-1, pace - paceShift) });
         const v2Fast = computeModelV2(race, { ...v2Opts, paceOverride: Math.min(+1, pace + paceShift) });
 
+        const wSlow = (enableCalibration && calib) ? applyTemperature(v2Slow.probs, calib.winTemperature) : v2Slow.probs;
+        const wNorm = (enableCalibration && calib) ? applyTemperature(v2.probs, calib.winTemperature) : v2.probs;
+        const wFast = (enableCalibration && calib) ? applyTemperature(v2Fast.probs, calib.winTemperature) : v2Fast.probs;
+
         const scenarios: ScenarioWeights[] = [
-            { p: pSlow, weights: v2Slow.probs },
-            { p: pNormal, weights: v2.probs },
-            { p: pFast, weights: v2Fast.probs },
+            { p: pSlow, weights: wSlow },
+            { p: pNormal, weights: wNorm },
+            { p: pFast, weights: wFast },
         ];
 
         finishProbs = estimateFinishProbsMixture(scenarios, mcIterations, rng);
         betEvents = estimateBetEventProbsMixture(scenarios, mcIterations, kPlace, horseNumbers, rng);
     } else {
-        finishProbs = estimateFinishProbs(v2.probs, mcIterations, rng);
-        betEvents = estimateBetEventProbs(v2.probs, mcIterations, kPlace, horseNumbers, rng);
+        const w = (enableCalibration && calib) ? applyTemperature(v2.probs, calib.winTemperature) : v2.probs;
+        finishProbs = estimateFinishProbs(w, mcIterations, rng);
+        betEvents = estimateBetEventProbs(w, mcIterations, kPlace, horseNumbers, rng);
+    }
+
+    if (enableCalibration && calib) {
+        finishProbs = {
+            win: finishProbs.win,
+            top2: finishProbs.top2.map(p => applyPlatt(p, calib.top2Platt)),
+            top3: finishProbs.top3.map(p => applyPlatt(p, calib.top3Platt)),
+        };
     }
 
     horses.forEach((h, i) => {

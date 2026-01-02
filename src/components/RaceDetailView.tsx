@@ -1,13 +1,53 @@
 'use client';
-import { useState } from 'react';
+import { useState, useEffect } from 'react';
 import Link from 'next/link';
+import { useSearchParams } from 'next/navigation';
 import { Race, Horse } from '@/lib/types';
 import RaceAnimation3D from './RaceAnimation3D';
 import { sampleOrderPlackettLuce } from '@/lib/simulator';
 
-export default function RaceDetailView({ race }: { race: Race }) {
+export default function RaceDetailView({ race: initialRace }: { race: Race }) {
+    const [race, setRace] = useState<Race>(initialRace);
+    useEffect(() => setRace(initialRace), [initialRace]);
+
     const [simOrder, setSimOrder] = useState<Horse[] | null>(null);
     const [isSimulating, setIsSimulating] = useState(false);
+
+    // Refresh Logic
+    const sp = useSearchParams();
+    const system = (race.system ?? 'NAR');
+    const budgetYen = sp.get('budgetYen');
+    const maxBets = sp.get('maxBets');
+    const dreamPct = sp.get('dreamPct');
+    const minUnitYen = sp.get('minUnitYen');
+
+    const [isRefreshing, setIsRefreshing] = useState(false);
+    const [autoRefresh, setAutoRefresh] = useState(true);
+
+    const refresh = async () => {
+        try {
+            setIsRefreshing(true);
+            const qs = new URLSearchParams();
+            qs.set('system', system);
+            if (budgetYen) qs.set('budgetYen', budgetYen);
+            if (maxBets) qs.set('maxBets', maxBets);
+            if (dreamPct) qs.set('dreamPct', dreamPct);
+            if (minUnitYen) qs.set('minUnitYen', minUnitYen);
+
+            const res = await fetch(`/api/races/${race.id}?` + qs.toString(), { cache: 'no-store' });
+            if (!res.ok) return;
+            const json = await res.json();
+            if (json?.race) setRace(json.race);
+        } finally {
+            setIsRefreshing(false);
+        }
+    };
+
+    useEffect(() => {
+        if (!autoRefresh) return;
+        const id = setInterval(() => { refresh(); }, 30_000);
+        return () => clearInterval(id);
+    }, [autoRefresh, race.id, system, budgetYen, maxBets, dreamPct, minUnitYen]);
 
     const startSimulation = () => {
         // weights（相対値でOK：正規化不要）
@@ -70,6 +110,21 @@ export default function RaceDetailView({ race }: { race: Race }) {
                 <p style={{ fontSize: '0.9rem', color: isPast ? '#ffcc00' : '#666', marginTop: '5px' }}>
                     Status: {dataLabel} {isPast ? '(Final Odds)' : ''}
                 </p>
+
+                <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 10 }}>
+                    <button
+                        onClick={refresh}
+                        disabled={isRefreshing}
+                        style={{ padding: '6px 10px', borderRadius: 6, background: '#333', color: '#fff', border: '1px solid #555', cursor: 'pointer' }}
+                    >
+                        {isRefreshing ? 'Updating…' : '🔄 Update (Odds/AI/Portfolio)'}
+                    </button>
+
+                    <label style={{ fontSize: '0.85rem', color: '#aaa', display: 'flex', gap: 6, alignItems: 'center' }}>
+                        <input type="checkbox" checked={autoRefresh} onChange={e => setAutoRefresh(e.target.checked)} />
+                        Auto refresh (30s)
+                    </label>
+                </div>
 
                 <div style={{
                     fontSize: '0.8rem',

@@ -309,7 +309,25 @@ function selectCandidates(
         ...capCandidatesByType(candidates, '馬単', 60, 10, profile),
     ].sort((a, b) => scoreCandidate(b, profile) - scoreCandidate(a, profile));
 
-    if (pool.length === 0) {
+    const minEvConservative = Number(process.env.KEIBA_MIN_EV_CONSERVATIVE ?? '-0.03'); // 保険を少し許す
+    const minEvBalanced = Number(process.env.KEIBA_MIN_EV_BALANCED ?? '0.00');     // 原則プラスEVのみ
+    const minEvDream = Number(process.env.KEIBA_MIN_EV_DREAM ?? '0.00');        // 夢枠も原則プラス
+
+    const minEv =
+        profile === 'conservative' ? minEvConservative :
+            profile === 'balanced' ? minEvBalanced :
+                minEvDream;
+
+    // 軸飛び生存券は“ややマイナス”を許す（ただし深いマイナスは切る）
+    const survivalMaxNeg = Number(process.env.KEIBA_SURVIVAL_MAX_NEG ?? '-0.06');
+
+    const pool2 = pool.filter(c => {
+        if (c.ev >= minEv) return true;
+        if (!c.includesAxis && c.ev >= survivalMaxNeg) return true;
+        return false;
+    });
+
+    if (pool2.length === 0) {
         notes.push('候補買い目が生成できませんでした（oddsTables不足 or Monte Carloで確率が付与できない可能性）');
         return { selected: [], notes };
     }
@@ -341,8 +359,8 @@ function selectCandidates(
         for (const st of beam) {
             // 上位から一定数だけ展開して速度確保
             const expandCap = 120;
-            for (let i = 0; i < Math.min(pool.length, expandCap); i++) {
-                const c = pool[i];
+            for (let i = 0; i < Math.min(pool2.length, expandCap); i++) {
+                const c = pool2[i];
                 if (!canAdd(st, c)) continue;
 
                 const nst: State = {
@@ -386,7 +404,7 @@ function selectCandidates(
 
     // 念のため：非軸が1つもない場合は非軸を強制で入れる
     if (!selected.some(c => !c.includesAxis)) {
-        const alt = pool.find(c => !c.includesAxis && !c.isDream);
+        const alt = pool2.find(c => !c.includesAxis && !c.isDream);
         if (alt) {
             selected[selected.length - 1] = alt;
         } else {

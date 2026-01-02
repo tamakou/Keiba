@@ -14,6 +14,23 @@ function trimText(text: string | undefined): string | null {
     return v && v.length > 0 ? v : null;
 }
 
+function inferClassFromRaceName(name: string | null): string | null {
+    const s = (name || '').replace(/\s+/g, '');
+    if (!s) return null;
+
+    // ざっくり（後で辞書強化できる）
+    const keys = [
+        'G1', 'G2', 'G3', 'Jpn1', 'Jpn2', 'Jpn3',
+        'オープン', 'OP', 'L', 'リステッド',
+        '3勝', '2勝', '1勝',
+        '未勝利', '新馬'
+    ];
+    for (const k of keys) {
+        if (s.includes(k)) return k;
+    }
+    return null;
+}
+
 // eslint-disable-next-line @typescript-eslint/no-explicit-any
 function parseOneRun($: cheerio.CheerioAPI, pastCell: any): HorseRun | null {
     // 空セルチェック
@@ -64,8 +81,8 @@ function parseOneRun($: cheerio.CheerioAPI, pastCell: any): HorseRun | null {
         if (last3fMatch) last3f = last3fMatch[1];
     }
 
-    // クラス情報がない場合はnull
-    const classInfo: string | null = null; // shutuba_pastにはクラス情報がない
+    // クラス推定
+    const classInfo = inferClassFromRaceName(raceName);
 
     return {
         date,
@@ -99,6 +116,8 @@ export async function fetchAllHorsesLast5FromShutubaPast(
 
     // データ行を取得（td.Pastを持つ行のみ）
     let rowIndex = 0;
+    let skipped = 0;
+
     $('tr').has('td.Past').each((_, tr) => {
         const $tr = $(tr);
         rowIndex++;
@@ -120,9 +139,11 @@ export async function fetchAllHorsesLast5FromShutubaPast(
             if (numMatch) umaban = parseInt(numMatch[1], 10);
         }
 
-        // 方法3: 行インデックスをフォールバック
+        // 方法3: 行インデックスをフォールバック (廃止：誤紐付け防止)
         if (umaban === 0) {
-            umaban = rowIndex;
+            // 馬番が取れない行は誤紐付けの原因になるのでスキップ
+            skipped++;
+            return;
         }
 
         // 過去戦績セル (td.Past) を収集
@@ -140,6 +161,8 @@ export async function fetchAllHorsesLast5FromShutubaPast(
 
     if (horseRunsMap.size === 0) {
         source.note = '戦績データなし（レース前または構造変更）';
+    } else if (skipped > 0) {
+        source.note = (source.note ? source.note + ' / ' : '') + `umaban未取得で${skipped}行スキップ`;
     }
 
     return { horseRunsMap, source };
