@@ -445,5 +445,81 @@ export async function fetchRaceOddsTables(
         }
     }
 
+    // ------------------------------------------------------------------------
+    // Simple History & Change Detection (Local File System Cache)
+    // ------------------------------------------------------------------------
+    try {
+        const cacheDir = path.join(process.cwd(), 'data', 'odds_history');
+        if (!fs.existsSync(cacheDir)) fs.mkdirSync(cacheDir, { recursive: true });
+
+        const cachePath = path.join(cacheDir, `${raceId}_odds.json`);
+        let history: { fetchedAt: string; odds: Record<string, number> }[] = [];
+
+        if (fs.existsSync(cachePath)) {
+            try {
+                const raw = fs.readFileSync(cachePath, 'utf-8');
+                history = JSON.parse(raw);
+            } catch { /* ignore */ }
+        }
+
+        // Current Odds (Win)
+        const currentWin = tables['単勝']?.odds || {};
+        const currentSnapshot: Record<string, number> = {};
+        let hasOdds = false;
+
+        for (const [k, v] of Object.entries(currentWin)) {
+            if (v.value != null) {
+                currentSnapshot[k] = v.value;
+                hasOdds = true;
+            }
+        }
+
+        if (hasOdds) {
+            // Compare with last
+            if (history.length > 0) {
+                const last = history[history.length - 1];
+                const lastOdds = last.odds;
+
+                // Add alert source if significant change
+                const alerts: string[] = [];
+                for (const [k, v] of Object.entries(currentSnapshot)) {
+                    const prev = lastOdds[k];
+                    if (prev != null) {
+                        const ratio = v / prev;
+                        if (prev < 10 && Math.abs(ratio - 1) > 0.2) { // 20% change for low odds
+                            alerts.push(`馬番${k}: ${prev.toFixed(1)} -> ${v.toFixed(1)} (${ratio > 1 ? 'UP' : 'DOWN'})`);
+                        }
+                    }
+                }
+
+                if (alerts.length > 0) {
+                    sources.push({
+                        url: 'internal:history',
+                        fetchedAtJst: new Date().toLocaleString('ja-JP', { timeZone: 'Asia/Tokyo' }),
+                        items: ['odds_alert'],
+                        note: alerts.join(' / ')
+                    });
+                    // Note: This note will be visible in Data Sources. 
+                    // To propagate to Race.oddsChangeAlert, the caller needs to handle it or we attach here?
+                    // Currently oddsProvider returns { tables, sources }. 
+                    // Caller (api/races/route.ts) maps sources.note to analysis notes if needed.
+                }
+            }
+
+            // Append current
+            history.push({
+                fetchedAt: new Date().toISOString(),
+                odds: currentSnapshot
+            });
+            // Keep last 10
+            if (history.length > 10) history = history.slice(history.length - 10);
+
+            fs.writeFileSync(cachePath, JSON.stringify(history, null, 2));
+        }
+
+    } catch (e) {
+        console.error('Odds history error:', e);
+    }
+
     return { tables, sources };
 }

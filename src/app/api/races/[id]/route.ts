@@ -36,6 +36,12 @@ export async function GET(request: Request, { params }: { params: Promise<{ id: 
             enableOptimization: true,
         });
 
+        // Odds Alert Populate
+        const alertSource = race.sources.find(s => s.items.includes('odds_alert'));
+        if (alertSource && alertSource.note) {
+            race.oddsChangeAlert = alertSource.note.split(' / ');
+        }
+
         return NextResponse.json({ race });
     } catch (error) {
         console.error(error);

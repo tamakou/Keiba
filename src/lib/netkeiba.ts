@@ -220,8 +220,11 @@ async function getRaceDetailsNar(raceId: string): Promise<Race | null> {
             jockeyUrl,
             trainerUrl,
             weight: weightStr,
+            weightValue: null, // NAR詳細パース未実装のため仮
             weightChange,
+            condition: '出走', // NAR詳細パース未実装のため仮
             odds,
+            previousOdds: null,
             popularity,
             horseUrl,
             last5: null,
@@ -444,8 +447,25 @@ async function getRaceDetailsJra(raceId: string): Promise<Race | null> {
         const trainerUrl = trainerHref ? absUrl(JRA_BASE, trainerHref) : null;
 
         const weightStr = $row.find('.Weight').text().trim() || '取得不可';
-        const weightMatch = weightStr.match(/\(([-+0-9]+)\)/);
-        const weightChange = weightMatch ? parseInt(weightMatch[1], 10) : null;
+        let weightValue: number | null = null;
+        let weightChange: number | null = null;
+        if (weightStr && weightStr !== '取得不可') {
+            const m = weightStr.match(/(\d+)\(([-+0-9]+)\)/);
+            if (m) {
+                weightValue = parseInt(m[1], 10);
+                weightChange = parseInt(m[2], 10);
+            } else {
+                // "(0)" のようなケースや "480" だけのケース
+                const m2 = weightStr.match(/(\d+)/);
+                if (m2) weightValue = parseInt(m2[1], 10);
+            }
+        }
+
+        // 直前情報判定
+        let condition: '出走' | '取消' | '除外' | '競走除外' = '出走';
+        if ($row.text().includes('取消')) condition = '取消';
+        else if ($row.text().includes('除外')) condition = '除外';
+        else if ($row.text().includes('競走除外')) condition = '競走除外';
 
         const oddsText =
             $row.find('.Odds').text().trim() ||
@@ -465,8 +485,11 @@ async function getRaceDetailsJra(raceId: string): Promise<Race | null> {
             jockeyUrl,
             trainerUrl,
             weight: weightStr,
+            weightValue,
             weightChange,
+            condition,
             odds,
+            previousOdds: null,
             popularity,
             horseUrl,
             last5: null,

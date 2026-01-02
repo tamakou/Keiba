@@ -53,10 +53,40 @@ export interface Horse {
     jockeyUrl?: string | null;
     trainerUrl?: string | null;
 
-    weight: string;              // 取れなければ "取得不可"
-    weightChange: number | null; // 欠損は null
+    // リアルタイム拡張
+    weatherDetail?: {
+        weather: string;   // "晴"
+        wind: string;      // "北西 2m" (取得できれば)
+        temperature: string; // "12.5" (取得できれば)
+    };
+    oddsHistory?: {
+        fetchedAt: string;
+        odds: Record<string, number>; // 単勝オッズ履歴 { "1": 2.5, "2": 3.0 }
+    }[]; // 直近N回分
+    oddsChangeAlert?: string[]; // "1番: 2.5->1.8 急落!" 等
+}
+
+export interface Horse {
+    gate: number;
+    number: number;
+    name: string;
+
+    jockey: string;
+    trainer: string;
+
+    // 外部統計取得用（db.netkeibaへ正規化して使う）
+    jockeyUrl?: string | null;
+    trainerUrl?: string | null;
+
+    weight: string;              // "480(+2)" / 取れなければ "取得不可"
+    weightValue: number | null;  // 480
+    weightChange: number | null; // +2 / 欠損は null
+
+    // 直前情報
+    condition: '出走' | '取消' | '除外' | '競走除外';
 
     odds: number | null;         // 単勝（欠損 null）
+    previousOdds: number | null; // 前回取得時のオッズ（比較用）
     popularity: number | null;
 
     horseUrl: string | null;     // 直近5走取得用
@@ -130,6 +160,18 @@ export interface Race {
     // 既存互換
     sourceUrl?: string;
     scrapedAt?: string; // ISO推奨
+
+    // リアルタイム拡張
+    weatherDetail?: {
+        weather: string;   // "晴"
+        wind: string;      // "北西 2m" (取得できれば)
+        temperature: string; // "12.5" (取得できれば)
+    };
+    oddsHistory?: {
+        fetchedAt: string;
+        odds: Record<string, number>; // 単勝オッズ履歴 { "1": 2.5, "2": 3.0 }
+    }[]; // 直近N回分
+    oddsChangeAlert?: string[]; // "1番: 2.5->1.8 急落!" 等
 
     // 分析結果
     analysis?: RaceAnalysis;

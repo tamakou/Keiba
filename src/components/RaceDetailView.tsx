@@ -3,7 +3,7 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { Race, Horse } from '@/lib/types';
-import RaceAnimation3D from './RaceAnimation3D';
+import RaceAnimation3D, { SimMode } from './RaceAnimation3D';
 import { sampleOrderPlackettLuce } from '@/lib/simulator';
 
 export default function RaceDetailView({ race: initialRace }: { race: Race }) {
@@ -12,6 +12,7 @@ export default function RaceDetailView({ race: initialRace }: { race: Race }) {
 
     const [simOrder, setSimOrder] = useState<Horse[] | null>(null);
     const [isSimulating, setIsSimulating] = useState(false);
+    const [simMode, setSimMode] = useState<SimMode>('visual');
 
     // Refresh Logic
     const sp = useSearchParams();
@@ -81,6 +82,7 @@ export default function RaceDetailView({ race: initialRace }: { race: Race }) {
     // Parse race date
     let isPast = false;
     let dataLabel = 'Real-time';
+    let isStale = false;
 
     if (race.date) {
         const y = parseInt(race.date.substring(0, 4));
@@ -92,6 +94,15 @@ export default function RaceDetailView({ race: initialRace }: { race: Race }) {
         if (raceDate < today) {
             isPast = true;
             dataLabel = `Final Data (${race.date.substring(0, 4)}/${race.date.substring(4, 6)}/${race.date.substring(6, 8)})`;
+        }
+    }
+
+    if (!isPast && race.scrapedAt) {
+        const scraped = new Date(race.scrapedAt);
+        const now = new Date();
+        const diffMs = now.getTime() - scraped.getTime();
+        if (diffMs > 10 * 60 * 1000) { // 10分以上
+            isStale = true;
         }
     }
 
@@ -107,9 +118,18 @@ export default function RaceDetailView({ race: initialRace }: { race: Race }) {
                 <p className="race-meta">
                     {race.time} | {race.course} | Weather: {race.weather} | Baba: {race.baba}
                 </p>
-                <p style={{ fontSize: '0.9rem', color: isPast ? '#ffcc00' : '#666', marginTop: '5px' }}>
+                <p style={{ fontSize: '0.9rem', color: isPast ? '#ffcc00' : isStale ? '#ff4444' : '#666', marginTop: '5px' }}>
                     Status: {dataLabel} {isPast ? '(Final Odds)' : ''}
+                    {isStale && <span style={{ fontWeight: 'bold', marginLeft: 10 }}>⚠️ Data is STALE ({Math.floor((new Date().getTime() - new Date(race.scrapedAt!).getTime()) / 60000)}m ago)</span>}
                 </p>
+
+                {/* Odds Change Alert */}
+                {race.oddsChangeAlert && race.oddsChangeAlert.length > 0 && (
+                    <div style={{ background: '#300', color: '#ff8888', padding: '10px', borderRadius: '4px', marginTop: '10px', border: '1px solid #f00' }}>
+                        <div style={{ fontWeight: 'bold' }}>⚠️ Odds Changed Significantly!</div>
+                        {race.oddsChangeAlert.map((msg, i) => <div key={i}>{msg}</div>)}
+                    </div>
+                )}
 
                 <div style={{ display: 'flex', gap: 12, alignItems: 'center', marginTop: 10 }}>
                     <button
@@ -199,10 +219,11 @@ export default function RaceDetailView({ race: initialRace }: { race: Race }) {
                     </thead>
                     <tbody>
                         {race.horses.map((h, i) => (
-                            <tr key={`${h.number}-${i}`}>
+                            <tr key={`${h.number}-${i}`} style={{ backgroundColor: h.condition && h.condition !== '出走' ? 'rgba(255,0,0,0.1)' : undefined }}>
                                 <td style={{ color: h.gate <= 2 ? '#fff' : '#888', fontWeight: 'bold' }}>
                                     <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
                                         <span>{h.gate}-{h.number}</span>
+                                        {h.condition && h.condition !== '出走' && <span style={{ fontSize: '0.7rem', color: '#ff4444' }}>{h.condition}</span>}
                                     </div>
                                 </td>
                                 <td>
@@ -252,19 +273,11 @@ export default function RaceDetailView({ race: initialRace }: { race: Race }) {
                                     {displayEv(h.ev)}
                                 </td>
                                 <td>
-                                    {h.factors.map((f, fi) => (
-                                        <span key={fi} style={{
-                                            display: 'inline-block',
-                                            background: 'rgba(255,255,255,0.1)',
-                                            padding: '2px 6px',
-                                            borderRadius: '3px',
-                                            marginRight: '4px',
-                                            marginBottom: '2px',
-                                            fontSize: '0.8rem'
-                                        }}>
-                                            {f}
-                                        </span>
-                                    ))}
+                                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: '4px' }}>
+                                        {h.factors.map((f, fi) => (
+                                            <span key={fi} className="badge">{f}</span>
+                                        ))}
+                                    </div>
                                 </td>
                             </tr>
                         ))}
@@ -275,9 +288,23 @@ export default function RaceDetailView({ race: initialRace }: { race: Race }) {
                 </div>
             </div>
 
-            <button className="sim-button" onClick={startSimulation} disabled={isSimulating}>
-                {isSimulating ? 'Running Race...' : 'Start Simulation'}
-            </button>
+            {/* Simulation Controls */}
+            <div style={{ marginTop: '40px', textAlign: 'center' }}>
+                <div style={{ marginBottom: 10, display: 'flex', justifyContent: 'center', gap: 20 }}>
+                    <label style={{ cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+                        <input type="radio" name="simMode" checked={simMode === 'visual'} onChange={() => setSimMode('visual')} style={{ marginRight: 6 }} />
+                        Visual Replay
+                    </label>
+                    <label style={{ cursor: 'pointer', display: 'flex', alignItems: 'center' }}>
+                        <input type="radio" name="simMode" checked={simMode === 'physics'} onChange={() => setSimMode('physics')} style={{ marginRight: 6 }} />
+                        Physics Simulation
+                    </label>
+                </div>
+                <button className="sim-button" onClick={startSimulation} disabled={isSimulating}>
+                    {isSimulating ? 'Running...' : '▶ Start 3D Simulation'}
+                </button>
+            </div>
+
 
             {/* Betting Strategies */}
             {race.portfolios && (
@@ -377,7 +404,7 @@ export default function RaceDetailView({ race: initialRace }: { race: Race }) {
                     padding: '20px'
                 }}>
                     <h2 style={{ color: '#fff', marginBottom: '10px', textAlign: 'center' }}>
-                        レース進行（3Dシミュレーション）
+                        レース進行（3Dシミュレーション: {simMode === 'physics' ? 'Physics' : 'Visual'}）
                     </h2>
 
                     <RaceAnimation3D
@@ -387,6 +414,7 @@ export default function RaceDetailView({ race: initialRace }: { race: Race }) {
                         venue={race.venue}
                         baba={race.baba}
                         weather={race.weather}
+                        mode={simMode}
                         onClose={() => { setIsSimulating(false); setSimOrder(null); }}
                         onFinish={() => { setIsSimulating(false); setSimOrder(null); }}
                     />
@@ -395,7 +423,6 @@ export default function RaceDetailView({ race: initialRace }: { race: Race }) {
         </div>
     );
 }
-
 function GetRiskColor(risk: string) {
     if (risk === 'Low') return '#4caf50';
     if (risk === 'Medium') return '#ff9800';
