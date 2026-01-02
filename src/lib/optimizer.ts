@@ -327,7 +327,15 @@ function selectCandidates(
         return false;
     });
 
+    let finalPool = pool2;
     if (pool2.length === 0) {
+        notes.push(`EVフィルタが厳しすぎるため無効化（minEv=${minEv}, survivalMaxNeg=${survivalMaxNeg}）`);
+        finalPool = pool;
+    } else if (pool2.length !== pool.length) {
+        notes.push(`EVフィルタ適用: ${pool.length}→${pool2.length}（minEv=${minEv}, survivalMaxNeg=${survivalMaxNeg}）`);
+    }
+
+    if (finalPool.length === 0) {
         notes.push('候補買い目が生成できませんでした（oddsTables不足 or Monte Carloで確率が付与できない可能性）');
         return { selected: [], notes };
     }
@@ -359,8 +367,8 @@ function selectCandidates(
         for (const st of beam) {
             // 上位から一定数だけ展開して速度確保
             const expandCap = 120;
-            for (let i = 0; i < Math.min(pool2.length, expandCap); i++) {
-                const c = pool2[i];
+            for (let i = 0; i < Math.min(finalPool.length, expandCap); i++) {
+                const c = finalPool[i];
                 if (!canAdd(st, c)) continue;
 
                 const nst: State = {
@@ -404,7 +412,7 @@ function selectCandidates(
 
     // 念のため：非軸が1つもない場合は非軸を強制で入れる
     if (!selected.some(c => !c.includesAxis)) {
-        const alt = pool2.find(c => !c.includesAxis && !c.isDream);
+        const alt = finalPool.find(c => !c.includesAxis && !c.isDream);
         if (alt) {
             selected[selected.length - 1] = alt;
         } else {

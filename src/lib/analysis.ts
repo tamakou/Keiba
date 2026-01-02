@@ -27,7 +27,22 @@ const sortByProb = (horses: Horse[]) => [...horses].sort((a, b) => b.estimatedPr
 const sortByEv = (horses: Horse[]) => [...horses].sort((a, b) => (b.ev ?? -999) - (a.ev ?? -999));
 const sortByUpset = (horses: Horse[]) => [...horses].sort((a, b) => (b.upsetIndex ?? 0) - (a.upsetIndex ?? 0));
 
+function hash32(s: string): number {
+    let h = 2166136261 >>> 0;
+    for (let i = 0; i < s.length; i++) {
+        h ^= s.charCodeAt(i);
+        h = Math.imul(h, 16777619);
+    }
+    return h >>> 0;
+}
 
+function makeRng(seed: number): () => number {
+    let x = (seed >>> 0) || 1;
+    return () => {
+        x = (Math.imul(1664525, x) + 1013904223) >>> 0;
+        return x / 4294967296;
+    };
+}
 function topKForPlace(n: number): number {
     if (n <= 4) return 1;
     if (n <= 7) return 2;
@@ -256,7 +271,17 @@ export async function analyzeRace(race: Race, opts: AnalyzeOptions = {}): Promis
     // ---------------------------
     const enablePaceMixture = process.env.KEIBA_ENABLE_PACE_MIXTURE !== '0'; // default ON
     const mcIterations = Number(process.env.KEIBA_MC_ITERATIONS || '') || 20000;
-    const rng = Math.random;
+
+    const rngMode = (process.env.KEIBA_RNG_MODE || 'deterministic').toLowerCase(); // 'math' で旧挙動
+    const baseSeedRaw = Number(process.env.KEIBA_RNG_SEED || '');
+    const baseSeed = Number.isFinite(baseSeedRaw) ? (baseSeedRaw >>> 0) : 0;
+    const seed = (baseSeed ^ hash32(race.id || '')) >>> 0;
+
+    const rng = (rngMode === 'math') ? Math.random : makeRng(seed);
+    const rngMarket = (rngMode === 'math') ? Math.random : makeRng(seed ^ 0xA5A5A5A5);
+
+    notes.push(`RNG: ${rngMode}${rngMode === 'math' ? '' : ` seed=${seed}`}`);
+
     const kPlace = topKForPlace(horses.length);
     const horseNumbers = horses.map(h => h.number);
 
@@ -337,7 +362,7 @@ export async function analyzeRace(race: Race, opts: AnalyzeOptions = {}): Promis
 
     if (allOddsAvailable) {
         const marketWin = horses.map(h => h.marketProb!);
-        const marketProbs = estimateFinishProbs(marketWin, mcIterations, Math.random);
+        const marketProbs = estimateFinishProbs(marketWin, mcIterations, rngMarket);
         horses.forEach((h, i) => {
             h.marketTop2Prob = marketProbs.top2[i];
             h.marketTop3Prob = marketProbs.top3[i];
