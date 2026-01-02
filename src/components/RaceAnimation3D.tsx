@@ -1,12 +1,15 @@
 'use client';
 import { useEffect, useRef, useState } from 'react';
 import { Horse } from '@/lib/types';
-import { parseRaceCourse } from '@/lib/courseParse';
+import { parseRaceCourse, normalizeBaba } from '@/lib/courseParse';
 
 interface RaceAnimationProps {
     horses: Horse[];
-    finishOrder: Horse[]; // 1着→最下位
+    finishOrder: Horse[]; // 1着→最下位（サンプル着順）
     courseStr: string;
+    venue?: string;
+    baba?: string;
+    weather?: string;
     onFinish: () => void;
     onClose?: () => void;
 }
@@ -17,11 +20,11 @@ interface RunnerState {
     lane: number;
     color: string;
 
-    finishRank: number;    // 0=1着
-    finishTimeMs: number;  // ゴールまでの時間
-    style: number;         // -1..+1 先行(-)〜差し(+)
-    phase: number;         // 微小ノイズ用
-
+    finishRank: number;
+    finishTimeMs: number;
+    style: number;          // -1..+1 先行(-)〜差し(+)
+    breakDelayMs: number;   // 出遅れ/反応差（小さく）
+    phase: number;          // 揺れ用
     finished: boolean;
 }
 
@@ -31,11 +34,14 @@ function smoothstep(a: number, b: number, x: number) {
     const t = clamp01((x - a) / (b - a));
     return t * t * (3 - 2 * t);
 }
+function hashInt(s: string): number {
+    let h = 0;
+    for (let i = 0; i < s.length; i++) h = (h * 31 + s.charCodeAt(i)) | 0;
+    return h;
+}
 
 function inferStyleFromLast5(h: Horse): number {
-    const runs = (h as any).last5 as any[] | null | undefined;
-    if (!runs || runs.length === 0) return (Math.random() * 2 - 1) * 0.4;
-
+    const runs = h.last5 || [];
     const pos: number[] = [];
     for (const r of runs) {
         const ptxt = (r?.passing || '') as string;
@@ -44,16 +50,18 @@ function inferStyleFromLast5(h: Horse): number {
         const p = parseInt(m[1], 10);
         if (Number.isFinite(p)) pos.push(p);
     }
-    if (pos.length === 0) return (Math.random() * 2 - 1) * 0.4;
+    if (pos.length === 0) return (Math.random() * 2 - 1) * 0.3;
 
     const avg = pos.reduce((a, b) => a + b, 0) / pos.length;
-    if (avg <= 3) return -0.75;      // 逃げ
-    if (avg <= 6) return -0.35;      // 先行
-    if (avg <= 10) return +0.15;     // 中団
-    return +0.65;                    // 差し/追込
+    if (avg <= 3) return -0.8;   // 逃げ
+    if (avg <= 6) return -0.4;   // 先行
+    if (avg <= 10) return +0.1;  // 中団
+    return +0.7;                 // 差し/追込
 }
 
-export default function RaceAnimation3D({ horses, finishOrder, courseStr, onFinish }: RaceAnimationProps) {
+export default function RaceAnimation3D({
+    horses, finishOrder, courseStr, venue, baba, weather, onFinish
+}: RaceAnimationProps) {
     const canvasRef = useRef<HTMLCanvasElement>(null);
     const containerRef = useRef<HTMLDivElement>(null);
     const requestRef = useRef<number | null>(null);
@@ -76,26 +84,67 @@ export default function RaceAnimation3D({ horses, finishOrder, courseStr, onFini
         setRankings([]);
         setRaceEnded(false);
 
-        // ---- course parse (芝/ダ/距離/直線) ----
+        // ---- course meta ----
         const parsed = parseRaceCourse(courseStr);
-        const surface = parsed.surface; // '芝' | 'ダ' | '障' | '不明'
-        const direction = parsed.direction;
-        let totalDistance = parsed.distance ?? 1600;
+        const surface = parsed.surface; // 芝/ダ/障/不明
+        const direction = parsed.direction; // 右/左/直/不明
+        const totalDistance = parsed.distance ?? 1600;
+        const isStraight = direction === '直' || (courseStr || '').includes('直線');
 
-        const isStraight = direction === '直' || courseStr.includes('直線');
+        const babaN = normalizeBaba(baba);
+        const babaAdj = babaN === '稍' ? 150 : babaN === '重' ? 350 : babaN === '不' ? 550 : 0;
+
+        // ---- unique-ish track per venue (でも破綻しない範囲) ----
+        const v = venue || 'unknown';
+        const vh = Math.abs(hashInt(v));
+        const vW = 0.92 + (vh % 21) / 100;           // 0.92..1.12
+        const vD = 0.92 + ((vh * 7) % 21) / 100;     // 0.92..1.12
+
+        // ---- geometry scale by distance ----
         const scale = Math.sqrt(Math.max(0.6, Math.min(2.0, totalDistance / 1600)));
 
-        // ---- track geometry (距離でスケール変化) ----
-        const baseW = isStraight ? 520 : 320;
+        const baseW = isStraight ? 540 : 320;
         const baseD = isStraight ? 120 : 170;
 
-        const trackWidth = baseW * scale;
-        const trackDepth = baseD * scale;
+        const trackWidth = baseW * scale * vW;
+        const trackDepth = baseD * scale * vD;
 
-        // camera
+        const R = trackDepth / 2;
+        const straightLen = Math.max(30, trackWidth - trackDepth);
+        const trackPerimeter = isStraight ? trackWidth : (2 * straightLen + 2 * Math.PI * R);
+
+        const getTrackPos3D = (d: number, lane: number) => {
+            const laneOffset = lane * 2.2;
+            if (isStraight) {
+                const x = -trackWidth / 2 + (d / totalDistance) * trackWidth;
+                const z = -trackDepth / 2 + laneOffset;
+                return { x, y: 0, z };
+            }
+
+            const dNorm = (d / totalDistance) * trackPerimeter;
+            const innerR = Math.max(10, R - laneOffset);
+
+            if (dNorm < straightLen) return { x: -straightLen / 2 + dNorm, y: 0, z: innerR };
+            let rem = dNorm - straightLen;
+
+            const halfCircle = Math.PI * R;
+            if (rem < halfCircle) {
+                const angle = (rem / halfCircle) * Math.PI;
+                return { x: straightLen / 2 + Math.sin(angle) * innerR, y: 0, z: Math.cos(angle) * innerR };
+            }
+            rem -= halfCircle;
+
+            if (rem < straightLen) return { x: straightLen / 2 - rem, y: 0, z: -innerR };
+            rem -= straightLen;
+
+            const angle = (rem / halfCircle) * Math.PI;
+            return { x: -straightLen / 2 - Math.sin(angle) * innerR, y: 0, z: -Math.cos(angle) * innerR };
+        };
+
+        // ---- camera ----
         const camX = 0;
-        const camY = 260 * scale + 90;
-        const camZ = 220 * scale + 70;
+        const camY = 260 * scale + 110;
+        const camZ = 220 * scale + 80;
         const fov = 520;
 
         const project3D = (x: number, y: number, z: number, W: number, H: number) => {
@@ -110,78 +159,36 @@ export default function RaceAnimation3D({ horses, finishOrder, courseStr, onFini
             return { x: W / 2 + dx * s, y: H / 3 - dy * s, scale: s, depth };
         };
 
-        // path
-        const R = trackDepth / 2;
-        const straightLen = Math.max(30, trackWidth - trackDepth);
-        const trackPerimeter = isStraight ? trackWidth : (2 * straightLen + 2 * Math.PI * R);
-
-        const getTrackPos3D = (d: number, lane: number) => {
-            const laneOffset = lane * 2.2; // 詰める
-            const zLane = laneOffset;
-
-            if (isStraight) {
-                const x = -trackWidth / 2 + (d / totalDistance) * trackWidth;
-                return { x, y: 0, z: zLane };
-            }
-
-            const dNorm = (d / totalDistance) * trackPerimeter;
-            const innerR = Math.max(10, R - laneOffset);
-
-            // bottom straight (near)
-            if (dNorm < straightLen) {
-                return { x: -straightLen / 2 + dNorm, y: 0, z: innerR };
-            }
-            let rem = dNorm - straightLen;
-
-            // right turn
-            const halfCircle = Math.PI * R;
-            if (rem < halfCircle) {
-                const angle = (rem / halfCircle) * Math.PI;
-                return { x: straightLen / 2 + Math.sin(angle) * innerR, y: 0, z: Math.cos(angle) * innerR };
-            }
-            rem -= halfCircle;
-
-            // top straight (far)
-            if (rem < straightLen) {
-                return { x: straightLen / 2 - rem, y: 0, z: -innerR };
-            }
-            rem -= straightLen;
-
-            // left turn
-            const angle = (rem / halfCircle) * Math.PI;
-            return { x: -straightLen / 2 - Math.sin(angle) * innerR, y: 0, z: -Math.cos(angle) * innerR };
-        };
-
         // ---- finish order ----
         finishOrderRef.current = (finishOrder && finishOrder.length === horses.length) ? finishOrder.slice() : horses.slice();
         const rankByNo = new Map<number, number>();
         finishOrderRef.current.forEach((h, idx) => rankByNo.set(h.number, idx));
 
-        // ---- finish time (着差を縮める) ----
-        const n = horses.length;
-
-        const baseMs = Math.max(12000, Math.min(26000, 7000 + totalDistance * 6));
+        // ---- finish time: 距離/馬場で変化 + 着差は小さめ ----
+        const baseMs = Math.max(12000, Math.min(28000, 7000 + totalDistance * 6)) + babaAdj;
         const surfaceAdj = surface === '芝' ? -250 : surface === 'ダ' ? +250 : 0;
-        let t = baseMs + surfaceAdj + (Math.random() - 0.5) * 500; // winner
 
+        const n = horses.length;
         const finishTimeByRank: number[] = [];
+        let t = baseMs + surfaceAdj + (Math.random() - 0.5) * 500;
+
+        // 1着→最下位に向けて、着差を縮める
         for (let r = 0; r < n; r++) {
             finishTimeByRank[r] = t;
-            // 60〜140msくらいの着差に（従来は180〜400msで離れすぎ）
-            const gap = 85 + (r / Math.max(1, n - 1)) * 25 + (Math.random() - 0.5) * 40;
-            t += Math.max(60, Math.min(140, gap));
+            const gap = 70 + (r / Math.max(1, n - 1)) * 25 + (Math.random() - 0.5) * 30; // だいたい50〜120ms
+            t += Math.max(50, Math.min(120, gap));
         }
-        const maxFinishMs = finishTimeByRank[n - 1] ?? (baseMs + 1600);
+        const maxFinishMs = finishTimeByRank[n - 1] ?? (baseMs + 1800);
 
-        // ---- progress curve（序盤は隊列が詰まる） ----
+        // ---- pace curve: 先行/差し ----
         const progressCurve = (u: number, style: number) => {
             const s = clamp11(style);
-            // 先行は前半やや速い、差しは後半やや伸びる（極端にしない）
-            const k = 1.25 + 0.55 * Math.abs(s); // 1.25..1.80
-            if (s >= 0) return Math.pow(u, k);              // 差し：後半寄り
-            return 1 - Math.pow(1 - u, k);                  // 先行：前半寄り
+            const k = 1.25 + 0.55 * Math.abs(s); // 1.25..1.80（極端にしない）
+            if (s >= 0) return Math.pow(u, k);                 // 差し：後半寄り
+            return 1 - Math.pow(1 - u, k);                     // 先行：前半寄り
         };
 
+        // ---- colors by surface ----
         const trackColor = surface === '芝' ? '#2E7D32' : '#8B4513';
         const infieldColor = surface === '芝' ? '#1B5E20' : '#228B22';
 
@@ -193,9 +200,11 @@ export default function RaceAnimation3D({ horses, finishOrder, courseStr, onFini
             const safeRank = (rank != null && rank >= 0 && rank < n) ? rank : (n - 1);
             const finishTimeMs = finishTimeByRank[safeRank] ?? maxFinishMs;
 
-            // last5由来の脚質（無ければ弱ランダム）
-            const st = inferStyleFromLast5(h);
-            const style = clamp11(st + (Math.random() - 0.5) * 0.20);
+            const styleBase = inferStyleFromLast5(h);
+            const style = clamp11(styleBase + (Math.random() - 0.5) * 0.20);
+
+            // 出遅れ/反応差は小さく（下位だけ遅いにならないよう rank と独立）
+            const breakDelayMs = Math.max(0, Math.min(140, 40 + (Math.random() - 0.5) * 80));
 
             return {
                 horse: h,
@@ -205,21 +214,22 @@ export default function RaceAnimation3D({ horses, finishOrder, courseStr, onFini
                 finishRank: safeRank,
                 finishTimeMs,
                 style,
+                breakDelayMs,
                 phase: Math.random() * Math.PI * 2,
                 finished: false
             };
         });
 
-        // ---- loop ----
+        // ---- main loop ----
         let startTime = performance.now();
-        const startDelayMs = 1400; // 少し短め
+        const startDelayMs = 1400;
         let startOverlayActive = true;
+
         let allFinished = false;
         let lastUiUpdate = 0;
         const uiUpdateIntervalMs = 220;
-        const stopAfterMs = startDelayMs + maxFinishMs + 5000;
 
-        const finishDist = isStraight ? totalDistance : 0;
+        const stopAfterMs = startDelayMs + maxFinishMs + 5000;
 
         const loop = (time: number) => {
             const elapsed = time - startTime;
@@ -232,25 +242,33 @@ export default function RaceAnimation3D({ horses, finishOrder, courseStr, onFini
             const raceMs = elapsed - startDelayMs;
 
             if (raceMs >= 0 && !allFinished) {
+                // 共通ペース（隊列が詰まりやすい）
+                const commonTimeMs = (baseMs + surfaceAdj + babaAdj) * 1.02;
+
                 runnersRef.current.forEach(r => {
                     if (r.finished) return;
 
-                    if (raceMs >= r.finishTimeMs) {
+                    const eff = raceMs - r.breakDelayMs;
+                    if (eff <= 0) { r.dist = 0; return; }
+
+                    if (eff >= r.finishTimeMs) {
                         r.dist = totalDistance;
                         r.finished = true;
-                    } else {
-                        const u = clamp01(raceMs / r.finishTimeMs);
-
-                        // pack: 序盤はu(共通ペース)寄り、後半ほど脚質カーブが効く
-                        const pack = smoothstep(0.05, 0.65, u);
-                        const frac = (1 - pack) * u + pack * progressCurve(u, r.style);
-
-                        // 微小な揺れ（隊列が崩れすぎないよう後半は弱く）
-                        const wobble = (1 - pack) * 0.006 * Math.sin((raceMs / 240) + r.phase);
-
-                        const targetDist = (clamp01(frac + wobble)) * totalDistance;
-                        r.dist = Math.max(r.dist, targetDist);
+                        return;
                     }
+
+                    const uHorse = clamp01(eff / r.finishTimeMs);
+                    const uCommon = clamp01(eff / commonTimeMs);
+
+                    // pack: 序盤はuCommon寄り（詰まる）→中盤以降に脚質/個別タイムが効く
+                    const pack = smoothstep(0.08, 0.60, uCommon);
+                    const frac = (1 - pack) * uCommon + pack * progressCurve(uHorse, r.style);
+
+                    // 微小揺れ（序盤は少し、後半は弱く）
+                    const wobble = (1 - pack) * 0.006 * Math.sin((eff / 240) + r.phase);
+
+                    const targetDist = clamp01(frac + wobble) * totalDistance;
+                    r.dist = Math.max(r.dist, targetDist);
                 });
 
                 if (time - lastUiUpdate >= uiUpdateIntervalMs) {
@@ -261,12 +279,12 @@ export default function RaceAnimation3D({ horses, finishOrder, courseStr, onFini
 
                 if (raceMs >= maxFinishMs) {
                     allFinished = true;
-                    setRankings([...finishOrderRef.current]);
+                    setRankings([...finishOrderRef.current]); // 最終結果はサンプル着順に固定
                     setRaceEnded(true);
                 }
             }
 
-            // sizing
+            // canvas sizing
             if (containerRef.current) {
                 canvas.width = containerRef.current.clientWidth;
                 canvas.height = containerRef.current.clientHeight;
@@ -274,20 +292,40 @@ export default function RaceAnimation3D({ horses, finishOrder, courseStr, onFini
             const W = canvas.width;
             const H = canvas.height;
 
-            // background
+            // background (weather affects sky)
+            const isRainy = weather && (weather.includes('雨') || weather.includes('Rain'));
             const grad = ctx.createLinearGradient(0, 0, 0, H);
-            grad.addColorStop(0, '#0b1020');
-            grad.addColorStop(0.6, '#132044');
-            grad.addColorStop(1, '#0a1228');
+            if (isRainy) {
+                grad.addColorStop(0, '#1a1a2e');
+                grad.addColorStop(0.6, '#2d3436');
+                grad.addColorStop(1, '#1e272e');
+            } else {
+                grad.addColorStop(0, '#0b1020');
+                grad.addColorStop(0.6, '#132044');
+                grad.addColorStop(1, '#0a1228');
+            }
             ctx.fillStyle = grad;
             ctx.fillRect(0, 0, W, H);
+
+            // rain effect
+            if (isRainy) {
+                ctx.strokeStyle = 'rgba(200, 200, 255, 0.3)';
+                ctx.lineWidth = 1;
+                for (let i = 0; i < 50; i++) {
+                    const rx = Math.random() * W;
+                    const ry = Math.random() * H;
+                    ctx.beginPath();
+                    ctx.moveTo(rx, ry);
+                    ctx.lineTo(rx - 2, ry + 8);
+                    ctx.stroke();
+                }
+            }
 
             // ---- draw track ----
             ctx.strokeStyle = '#fff';
             ctx.lineWidth = 2;
 
             if (isStraight) {
-                // rectangle track
                 const p1 = project3D(-trackWidth / 2, 0, -trackDepth / 2, W, H);
                 const p2 = project3D(trackWidth / 2, 0, -trackDepth / 2, W, H);
                 const p3 = project3D(trackWidth / 2, 0, trackDepth / 2, W, H);
@@ -305,7 +343,7 @@ export default function RaceAnimation3D({ horses, finishOrder, courseStr, onFini
                     ctx.stroke();
                 }
 
-                // finish line at end
+                // finish line
                 const fl1 = project3D(trackWidth / 2, 0, -trackDepth / 2, W, H);
                 const fl2 = project3D(trackWidth / 2, 0, trackDepth / 2, W, H);
                 if (fl1 && fl2) {
@@ -317,7 +355,7 @@ export default function RaceAnimation3D({ horses, finishOrder, courseStr, onFini
                     ctx.stroke();
                 }
             } else {
-                // oval track outer
+                // outer
                 ctx.fillStyle = trackColor;
                 ctx.beginPath();
                 let first = true;
@@ -332,7 +370,7 @@ export default function RaceAnimation3D({ horses, finishOrder, courseStr, onFini
                 ctx.fill();
                 ctx.stroke();
 
-                // inner infield
+                // infield
                 ctx.fillStyle = infieldColor;
                 ctx.beginPath();
                 first = true;
@@ -346,9 +384,9 @@ export default function RaceAnimation3D({ horses, finishOrder, courseStr, onFini
                 ctx.closePath();
                 ctx.fill();
 
-                // finish line
-                const fl1 = getTrackPos3D(finishDist, -1);
-                const fl2 = getTrackPos3D(finishDist, 10);
+                // finish line at start
+                const fl1 = getTrackPos3D(0, -1);
+                const fl2 = getTrackPos3D(0, 10);
                 const pfl1 = project3D(fl1.x, 0, fl1.z, W, H);
                 const pfl2 = project3D(fl2.x, 0, fl2.z, W, H);
                 if (pfl1 && pfl2) {
@@ -361,7 +399,7 @@ export default function RaceAnimation3D({ horses, finishOrder, courseStr, onFini
                 }
             }
 
-            // ---- draw horses (depth sort) ----
+            // horses depth sort
             const horseData = runnersRef.current
                 .filter(r => !r.finished)
                 .map(r => {
@@ -376,13 +414,11 @@ export default function RaceAnimation3D({ horses, finishOrder, courseStr, onFini
                 if (!p) return;
                 const size = Math.max(8, 18 * p.scale);
 
-                // shadow
                 ctx.fillStyle = 'rgba(0,0,0,0.45)';
                 ctx.beginPath();
                 ctx.ellipse(p.x, p.y + size / 2, size, size / 3, 0, 0, Math.PI * 2);
                 ctx.fill();
 
-                // body
                 ctx.fillStyle = r.color;
                 ctx.strokeStyle = '#000';
                 ctx.lineWidth = 2;
@@ -395,7 +431,6 @@ export default function RaceAnimation3D({ horses, finishOrder, courseStr, onFini
                 ctx.fill();
                 ctx.stroke();
 
-                // number
                 ctx.fillStyle = r.color === '#fff' || r.color === '#d6c526' ? '#000' : '#fff';
                 ctx.font = `bold ${Math.max(10, size * 0.8)}px Arial`;
                 ctx.textAlign = 'center';
@@ -409,8 +444,7 @@ export default function RaceAnimation3D({ horses, finishOrder, courseStr, onFini
 
         requestRef.current = requestAnimationFrame(loop);
         return () => { if (requestRef.current) cancelAnimationFrame(requestRef.current); };
-
-    }, [horses, finishOrder, courseStr]);
+    }, [horses, finishOrder, courseStr, venue, baba, weather]);
 
     return (
         <div ref={containerRef} style={{
@@ -432,6 +466,18 @@ export default function RaceAnimation3D({ horses, finishOrder, courseStr, onFini
                     🏇 START 🏇
                 </div>
             )}
+
+            {/* Course info overlay */}
+            <div style={{
+                position: 'absolute', top: '15px', left: '15px',
+                background: 'rgba(0,0,0,0.75)', padding: '8px 12px', borderRadius: '8px',
+                color: '#fff', fontSize: '0.85rem'
+            }}>
+                <div style={{ fontWeight: 'bold', marginBottom: '4px' }}>{venue || '不明'}</div>
+                <div>{courseStr}</div>
+                <div style={{ color: baba === '不良' || baba === '重' ? '#ff6b6b' : '#8f8' }}>馬場: {baba || '不明'}</div>
+                {weather && <div>天候: {weather}</div>}
+            </div>
 
             <div style={{
                 position: 'absolute', top: '15px', right: '15px',

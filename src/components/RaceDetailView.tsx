@@ -384,6 +384,9 @@ export default function RaceDetailView({ race: initialRace }: { race: Race }) {
                         horses={race.horses}
                         finishOrder={simOrder}
                         courseStr={race.course}
+                        venue={race.venue}
+                        baba={race.baba}
+                        weather={race.weather}
                         onClose={() => { setIsSimulating(false); setSimOrder(null); }}
                         onFinish={() => { setIsSimulating(false); setSimOrder(null); }}
                     />
