@@ -18,7 +18,10 @@
     "fit:calib": "tsx scripts/fitCalibration.ts --data data/backtest_train.json --out data/calibration.json --mc 4000 --seed 12345",
     "calib:holdout": "tsx scripts/calibrationReport.ts --data data/backtest_holdout.json --out data/calibration_report.json --bins 10 --mc 4000 --mix 1 --min 200",
     "baseline:holdout": "tsx scripts/baselineReport.ts --data data/backtest_holdout.json --out data/baseline_report.json --mc 4000 --bins 10 --mix 1",
-    "sigtest:holdout": "tsx scripts/bootstrapSignificance.ts --data data/backtest_holdout.json --out data/significance_report.json --A full --B formOnly --iters 500 --mc 4000 --bins 10 --mix 1"
+    "sigtest:holdout": "tsx scripts/bootstrapSignificance.ts --data data/backtest_holdout.json --out data/significance_report.json --A full --B formOnly --iters 500 --mc 4000 --bins 10 --mix 1",
+    "portfolio:holdout": "tsx scripts/portfolioBacktest.ts --data data/backtest_holdout.json --out data/portfolio_report.json --budget 20000 --maxBets 7 --dreamPct 0.03 --unit 100",
+    "tune:ev": "tsx scripts/tuneEvThreshold.ts --mc 2000 --out data/ev_thresholds.json",
+    "compare:market": "tsx scripts/portfolioCompareToMarket.ts --mc 4000 --iters 2000 --out data/portfolio_vs_market.json"
   },
   "dependencies": {
     "cheerio": "^1.1.2",
