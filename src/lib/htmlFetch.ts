@@ -21,8 +21,11 @@ export async function fetchHtmlAuto(url: string): Promise<FetchHtmlResult> {
     });
 
     const finalUrl = res.url || url;
+
+    // 4xx/5xx エラーの場合は空HTMLを返す（クラッシュ防止）
     if (!res.ok) {
-        throw new Error(`HTTP ${res.status} ${res.statusText} (${finalUrl})`);
+        console.warn(`HTTP ${res.status} ${res.statusText} (${finalUrl})`);
+        return { url: finalUrl, html: '', fetchedAtJst: nowJstString() };
     }
 
     const ab = await res.arrayBuffer();
@@ -30,7 +33,7 @@ export async function fetchHtmlAuto(url: string): Promise<FetchHtmlResult> {
 
     // まずlatin1でcharsetを抜く
     const latin1 = buf.toString('latin1');
-    const m = latin1.match(/charset=([^\s"'>]+)/i);
+    const m = latin1.match(/charset=([^\s"'>\>]+)/i);
     const charset = (m?.[1] ?? '').toUpperCase();
 
     let html: string;
@@ -39,9 +42,19 @@ export async function fetchHtmlAuto(url: string): Promise<FetchHtmlResult> {
     } else if (charset.includes('EUC-JP') || charset.includes('EUCJP')) {
         html = iconv.decode(buf, 'EUC-JP');
     } else {
-        // フォールバック：utf8が壊れてそうならEUC-JP
-        const utf = buf.toString('utf8');
-        html = utf.includes('�') ? iconv.decode(buf, 'EUC-JP') : utf;
+        // フォールバック
+        // netkeibaはデフォルトEUC-JPと考えたほうが安全
+        if (finalUrl.includes('netkeiba.com')) {
+            html = iconv.decode(buf, 'EUC-JP');
+            // 万が一UTF-8宣言があったらやり直し
+            if (html.match(/charset=["']?UTF-8/i)) {
+                html = buf.toString('utf8');
+            }
+        } else {
+            const utf = buf.toString('utf8');
+            // REPLACEMENT CHARACTER () が含まれていたらEUC-JPを試す
+            html = utf.includes('\uFFFD') ? iconv.decode(buf, 'EUC-JP') : utf;
+        }
     }
 
     return { url: finalUrl, html, fetchedAtJst: nowJstString() };

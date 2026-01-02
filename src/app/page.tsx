@@ -14,18 +14,58 @@ async function getRacesServer(date: string) {
   }
 }
 
-function formatDate(d: Date): string {
-  const y = d.getFullYear();
-  const m = (d.getMonth() + 1).toString().padStart(2, '0');
-  const day = d.getDate().toString().padStart(2, '0');
+function normalizeDateParam(raw?: string): string | null {
+  if (!raw) return null;
+  const digits = raw.replace(/\D/g, '');
+  if (digits.length !== 8) return null;
+  const y = parseInt(digits.substring(0, 4), 10);
+  const m = parseInt(digits.substring(4, 6), 10);
+  const d = parseInt(digits.substring(6, 8), 10);
+  if (!(y >= 1990 && y <= 2100 && m >= 1 && m <= 12 && d >= 1 && d <= 31)) return null;
+  return digits;
+}
+
+function formatDateUTC(d: Date): string {
+  const y = d.getUTCFullYear();
+  const m = (d.getUTCMonth() + 1).toString().padStart(2, '0');
+  const day = d.getUTCDate().toString().padStart(2, '0');
   return `${y}${m}${day}`;
 }
 
-function parseDate(s: string): Date {
-  const y = parseInt(s.substring(0, 4));
-  const m = parseInt(s.substring(4, 6)) - 1;
-  const d = parseInt(s.substring(6, 8));
-  return new Date(y, m, d);
+function parseDateUTC(s: string): Date {
+  const y = parseInt(s.substring(0, 4), 10);
+  const m = parseInt(s.substring(4, 6), 10) - 1;
+  const d = parseInt(s.substring(6, 8), 10);
+  return new Date(Date.UTC(y, m, d));
+}
+
+function todayJstYYYYMMDD(): string {
+  // サーバのタイムゾーンに依存せずJSTの今日を作る
+  const parts = new Intl.DateTimeFormat('en-CA', {
+    timeZone: 'Asia/Tokyo',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).formatToParts(new Date());
+  const y = parts.find(p => p.type === 'year')?.value ?? '1970';
+  const m = parts.find(p => p.type === 'month')?.value ?? '01';
+  const d = parts.find(p => p.type === 'day')?.value ?? '01';
+  return `${y}${m}${d}`;
+}
+
+async function findNearestDateWithRaces(baseYYYYMMDD: string, maxDays = 7): Promise<{ date: string; races: Race[] } | null> {
+  const base = parseDateUTC(baseYYYYMMDD);
+  // 近い未来を優先、次に過去
+  for (let offset = 1; offset <= maxDays; offset++) {
+    for (const sign of [1, -1]) {
+      const dt = new Date(base);
+      dt.setUTCDate(dt.getUTCDate() + sign * offset);
+      const ds = formatDateUTC(dt);
+      const rs = await getRacesServer(ds);
+      if (rs.length > 0) return { date: ds, races: rs };
+    }
+  }
+  return null;
 }
 
 // Group races by system
@@ -44,19 +84,34 @@ function groupBySystem(races: Race[]): { nar: Race[]; jra: Race[] } {
 
 export default async function Home({ searchParams }: { searchParams: Promise<{ date?: string }> }) {
   const params = await searchParams;
-  // デフォルトは今日or 20260105（JRAテスト用）
-  const dateStr = params.date || formatDate(new Date());
-  const races = await getRacesServer(dateStr);
+  const requested = normalizeDateParam(params.date);
+  const defaultDate = todayJstYYYYMMDD();
+  const requestedOrDefault = requested ?? defaultDate;
+
+  let dateStr = requestedOrDefault;
+  let races = await getRacesServer(dateStr);
+  let autoNote: string | null = null;
+
+  if (races.length === 0) {
+    // ユーザー指定日または今日にレースがない場合、近くの日を探す
+    const found = await findNearestDateWithRaces(dateStr, 7);
+    if (found) {
+      autoNote = `指定日(${dateStr})にレースが無かったため、近い日(${found.date})を表示しています。`;
+      dateStr = found.date;
+      races = found.races;
+    }
+  }
+
   const { nar, jra } = groupBySystem(races);
 
   // Calculate Prev/Next
-  const currentDate = parseDate(dateStr);
+  const currentDate = parseDateUTC(dateStr);
   const prevDate = new Date(currentDate);
-  prevDate.setDate(currentDate.getDate() - 1);
-  const prevStr = formatDate(prevDate);
+  prevDate.setUTCDate(currentDate.getUTCDate() - 1);
+  const prevStr = formatDateUTC(prevDate);
   const nextDate = new Date(currentDate);
-  nextDate.setDate(currentDate.getDate() + 1);
-  const nextStr = formatDate(nextDate);
+  nextDate.setUTCDate(currentDate.getUTCDate() + 1);
+  const nextStr = formatDateUTC(nextDate);
 
   return (
     <main className="container">
@@ -75,6 +130,12 @@ export default async function Home({ searchParams }: { searchParams: Promise<{ d
             Next ({nextStr}) &rarr;
           </Link>
         </div>
+
+        {autoNote && (
+          <div className="glass" style={{ padding: '12px 16px', marginTop: '12px', textAlign: 'center' }}>
+            {autoNote}
+          </div>
+        )}
       </div>
 
       {/* JRA Section */}
